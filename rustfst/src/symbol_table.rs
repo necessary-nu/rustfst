@@ -132,6 +132,14 @@ impl<H: BuildHasher> SymbolTable<H> {
         }
     }
 
+    /// Adds a symbol at an explicit (possibly sparse) `key` rather than the next
+    /// sequential label. Mirrors OpenFST's `SymbolTable::AddSymbol(symbol, key)`,
+    /// which HFST relies on to make the FST's labels coincide with its global
+    /// symbol numbers (so the basic-transducer round-trip preserves them).
+    pub fn add_symbol_with_key(&mut self, sym: impl Into<String>, key: Label) {
+        self.bimap.insert_at(sym, key as usize);
+    }
+
     /// Returns the number of symbols stored in the symbol table.
     ///
     /// # Examples
@@ -379,6 +387,20 @@ impl<H: BuildHasher> BiHashMapString<H> {
         }
     }
 
+    /// Insert `v` at an explicit (possibly sparse) `id`, padding the dense id
+    /// vector with empty placeholders for any skipped ids. Mirrors OpenFST's
+    /// `SymbolTable::AddSymbol(symbol, key)`, which assigns an explicit label
+    /// rather than the next sequential one. Only the real symbol is registered
+    /// in the string→id map; padding ids map to the empty string via id→string.
+    pub fn insert_at(&mut self, v: impl Into<String>, id: usize) {
+        let v = v.into();
+        if id >= self.id_to_string.len() {
+            self.id_to_string.resize(id + 1, String::new());
+        }
+        self.id_to_string[id] = v.clone();
+        self.string_to_id.insert(v, id);
+    }
+
     pub fn get_id(&self, v: impl AsRef<str>) -> Option<usize> {
         self.string_to_id.get(v.as_ref()).cloned()
     }
@@ -392,11 +414,21 @@ impl<H: BuildHasher> BiHashMapString<H> {
     }
 
     pub fn iter_strings(&self) -> impl Iterator<Item = &str> {
-        self.id_to_string.iter().map(|s| s.as_str())
+        // Empty entries are placeholders for sparse ids produced by `insert_at`
+        // (OpenFST's explicit-key AddSymbol); they are not real symbols.
+        self.id_to_string
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.as_str())
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (usize, &str)> {
-        self.id_to_string.iter().map(|s| s.as_str()).enumerate()
+        // Skip empty `insert_at` placeholders (see `iter_strings`).
+        self.id_to_string
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| !s.is_empty())
+            .map(|(i, s)| (i, s.as_str()))
     }
 }
 
