@@ -57,18 +57,8 @@ where
     // idistance[s] = shortest distance from the start state to s.
     let idistance = shortest_distance(fst, false)?;
 
-    let fdist = |s: StateId| -> W {
-        fdistance
-            .get(s as usize)
-            .cloned()
-            .unwrap_or_else(W::zero)
-    };
-    let idist = |s: StateId| -> W {
-        idistance
-            .get(s as usize)
-            .cloned()
-            .unwrap_or_else(W::zero)
-    };
+    let fdist = |s: StateId| -> W { fdistance.get(s as usize).cloned().unwrap_or_else(W::zero) };
+    let idist = |s: StateId| -> W { idistance.get(s as usize).cloned().unwrap_or_else(W::zero) };
 
     // If the start state cannot reach any final state the result is empty.
     if fdist(start).is_zero() {
