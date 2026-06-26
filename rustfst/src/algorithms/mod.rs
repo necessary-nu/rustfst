@@ -9,6 +9,7 @@ pub use self::{
     minimize::{acceptor_minimize, minimize, minimize_with_config, MinimizeConfig},
     optimize::optimize,
     projection::{project, ProjectType},
+    prune::prune,
     push::{
         push, push_weights, push_weights_with_config, push_with_config, PushConfig, PushType,
         PushWeightsConfig,
@@ -55,6 +56,7 @@ mod minimize;
 mod optimize;
 mod partition;
 mod projection;
+mod prune;
 mod push;
 mod queue;
 
