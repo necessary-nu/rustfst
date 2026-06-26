@@ -21,6 +21,32 @@ use crate::parsers::write_bin_i64;
 use crate::semirings::SerializableSemiring;
 use crate::{StateId, Tr, Trs, TrsVec, EPS_LABEL};
 
+impl<W: SerializableSemiring> VectorFst<W> {
+    /// Parse a single binary `VectorFst` from the front of `data`, returning the
+    /// parsed FST together with the number of bytes consumed. Unlike [`load`],
+    /// this does not require `data` to contain exactly one FST: trailing bytes
+    /// (for example further FSTs concatenated in a multi-transducer HFST stream)
+    /// are left untouched and reported via the returned length so the caller can
+    /// reposition its reader at the next record.
+    ///
+    /// [`load`]: SerializableFst::load
+    pub fn load_prefix(data: &[u8]) -> Result<(Self, usize)> {
+        let (remaining, parsed_fst) = parse_vector_fst(data).map_err(|e| {
+            e.map(|e_inner| match e_inner {
+                NomCustomError::Nom(_, k) => {
+                    format_err!("Error while parsing binary VectorFst. Error kind {:?}", k)
+                }
+                NomCustomError::SymbolTableError(e) => format_err!(
+                    "Error while parsing symbolTable from binary VectorFst : {}",
+                    e
+                ),
+            })
+        })?;
+        let consumed = data.len() - remaining.len();
+        Ok((parsed_fst, consumed))
+    }
+}
+
 impl<W: SerializableSemiring> SerializableFst<W> for VectorFst<W> {
     fn fst_type() -> String {
         "vector".to_string()
