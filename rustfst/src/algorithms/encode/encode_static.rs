@@ -99,3 +99,24 @@ where
         .with_context(|| format_err!("Error calling TrMap with EncodeMapper."))?;
     Ok(encode_mapper.encode_table)
 }
+
+/// Encodes `fst` reusing the label space of an existing `EncodeTable`, returning
+/// the (extended) table. This is the equivalent of OpenFST's
+/// `Encode(fst, &encoder)` with a *shared* encoder: encoding several FSTs through
+/// one table assigns the same encoded label to the same (ilabel, olabel[, weight])
+/// tuple across all of them. Required whenever encoded FSTs are subsequently
+/// compared (e.g. equivalence after `encode`): two independently-built tables only
+/// agree by coincidence, so the comparison would otherwise be sensitive to the
+/// order in which the tuples were first seen.
+pub fn encode_into<W, F>(fst: &mut F, table: EncodeTable<W>) -> Result<EncodeTable<W>>
+where
+    W: Semiring,
+    F: MutableFst<W>,
+{
+    let mut encode_mapper = EncodeMapper {
+        encode_table: table,
+    };
+    fst.tr_map(&mut encode_mapper)
+        .with_context(|| format_err!("Error calling TrMap with EncodeMapper."))?;
+    Ok(encode_mapper.encode_table)
+}
