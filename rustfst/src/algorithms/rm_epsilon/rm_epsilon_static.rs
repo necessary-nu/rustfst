@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 use crate::algorithms::dfs_visit::dfs_visit;
 use crate::algorithms::queues::AutoQueue;
@@ -167,7 +167,16 @@ pub(crate) fn rm_epsilon_with_internal_config<W: Semiring, F: MutableFst<W>, Q: 
     fst.set_properties(rmepsilon_properties(fst.properties(), false));
 
     if weight_threshold != W::zero() || state_threshold.is_some() {
-        todo!("Implement Prune!")
+        // OpenFST's RmEpsilon prunes the result in place when either threshold is
+        // set (rmepsilon.h). `prune` runs `connect` internally, which is why the
+        // `connect` call below is gated to the no-threshold case.
+        if state_threshold.is_some() {
+            // The ported `prune` only implements weight-threshold pruning, not
+            // OpenFST's `PruneOptions::state_threshold`. Fail loudly rather than
+            // silently ignoring the requested state cap.
+            bail!("rm_epsilon: state_threshold pruning is not yet supported");
+        }
+        crate::algorithms::prune(fst, weight_threshold.clone())?;
     }
 
     if connect && weight_threshold == W::zero() && state_threshold.is_none() {
@@ -198,5 +207,70 @@ mod tests {
             assert!(fst.input_symbols().is_some());
             assert!(fst.output_symbols().is_some());
         }
+    }
+
+    use crate::algorithms::queues::AutoQueue;
+    use crate::fst_traits::ExpandedFst;
+    use crate::semirings::Semiring;
+    use crate::Tr;
+    use anyhow::Result;
+
+    fn num_trs<F: ExpandedFst<TropicalWeight>>(fst: &F) -> usize {
+        fst.states_iter().map(|s| fst.num_trs(s).unwrap()).sum()
+    }
+
+    // A weight_threshold on the internal config must route through `prune`:
+    // here the heavier (weight 5) path falls outside shortest (1) ⊗ threshold (1)
+    // = 2, so it is pruned and `connect` drops the now-unreachable state.
+    #[test]
+    fn test_rm_epsilon_weight_threshold_prunes() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s0 = fst.add_state();
+        let s1 = fst.add_state();
+        let s2 = fst.add_state();
+        fst.set_start(s0)?;
+        fst.set_final(s1, TropicalWeight::one())?;
+        fst.set_final(s2, TropicalWeight::one())?;
+        fst.add_tr(s0, Tr::new(1, 1, TropicalWeight::new(1.0), s1))?;
+        fst.add_tr(s0, Tr::new(2, 2, TropicalWeight::new(5.0), s2))?;
+
+        let tr_filter = EpsilonTrFilter {};
+        let queue = AutoQueue::new(&fst, None, &tr_filter)?;
+        let opts = RmEpsilonInternalConfig::new(
+            queue,
+            true,
+            TropicalWeight::new(1.0),
+            None,
+            crate::KSHORTESTDELTA,
+        );
+        rm_epsilon_with_internal_config(&mut fst, opts)?;
+
+        assert_eq!(fst.num_states(), 2);
+        assert_eq!(num_trs(&fst), 1);
+        Ok(())
+    }
+
+    // state_threshold pruning is not implemented by the ported `prune`; the
+    // config path must fail loudly rather than silently ignore it.
+    #[test]
+    fn test_rm_epsilon_state_threshold_unsupported() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s0 = fst.add_state();
+        let s1 = fst.add_state();
+        fst.set_start(s0)?;
+        fst.set_final(s1, TropicalWeight::one())?;
+        fst.add_tr(s0, Tr::new(1, 1, TropicalWeight::one(), s1))?;
+
+        let tr_filter = EpsilonTrFilter {};
+        let queue = AutoQueue::new(&fst, None, &tr_filter)?;
+        let opts = RmEpsilonInternalConfig::new(
+            queue,
+            true,
+            TropicalWeight::zero(),
+            Some(1),
+            crate::KSHORTESTDELTA,
+        );
+        assert!(rm_epsilon_with_internal_config(&mut fst, opts).is_err());
+        Ok(())
     }
 }
