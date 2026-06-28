@@ -185,11 +185,13 @@ where
     };
 
     let distinct_psubsequential_labels = !(det_type == DeterminizeType::DeterminizeNonFunctional);
-    fst_res.set_properties(determinize_properties(
-        iprops,
-        false,
-        distinct_psubsequential_labels,
-    ));
+    let mut props = determinize_properties(iprops, false, distinct_psubsequential_labels);
+    if iprops.contains(FstProperties::ACCEPTOR) {
+        // The FSA determinization path emits each state's transitions in
+        // input-label order; for an acceptor that is also output-label-sorted.
+        props |= FstProperties::I_LABEL_SORTED | FstProperties::O_LABEL_SORTED;
+    }
+    fst_res.set_properties(props);
     fst_res.set_symts_from_fst(fst_in.borrow());
     Ok(fst_res)
 }
