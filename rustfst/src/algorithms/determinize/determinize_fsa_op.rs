@@ -169,6 +169,18 @@ where
 
         det_tr.dest_tuple.subset.pairs = new_pairs.values().cloned().collect();
 
+        // The subset is the key under which this destination state is looked up
+        // in the state table (DeterminizeStateTuple derives an order-sensitive
+        // Hash/Eq over `pairs`). Rebuilding from a HashMap above leaves the pairs
+        // in an arbitrary order, so equal subsets would otherwise be assigned
+        // distinct states. Restore a canonical order (by state, unique after the
+        // merge) so identical subsets map to the same state.
+        det_tr
+            .dest_tuple
+            .subset
+            .pairs
+            .sort_by(|a, b| a.state.cmp(&b.state));
+
         for dest_elt in det_tr.dest_tuple.subset.pairs.iter_mut() {
             dest_elt.weight = dest_elt
                 .weight

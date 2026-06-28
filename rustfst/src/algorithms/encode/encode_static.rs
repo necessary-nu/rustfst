@@ -66,7 +66,7 @@ impl<W: Semiring> TrMapper<W> for EncodeMapper<W> {
     }
 
     fn properties(&self, inprops: FstProperties) -> FstProperties {
-        let outprops = inprops;
+        let mut outprops = inprops;
         let mut mask = FstProperties::all_properties();
         if self.encode_labels() {
             mask &= FstProperties::i_label_invariant_properties()
@@ -77,7 +77,17 @@ impl<W: Semiring> TrMapper<W> for EncodeMapper<W> {
                 & FstProperties::weight_invariant_properties()
                 & FstProperties::add_super_final_properties()
         }
-        outprops & mask
+        mask |= FstProperties::I_DETERMINISTIC;
+        outprops &= mask;
+        // Encoding labels yields an acceptor; encoding weights yields an
+        // unweighted fst.
+        if self.encode_labels() {
+            outprops |= FstProperties::ACCEPTOR;
+        }
+        if self.encode_weights() {
+            outprops |= FstProperties::UNWEIGHTED | FstProperties::UNWEIGHTED_CYCLES;
+        }
+        outprops
     }
 }
 
