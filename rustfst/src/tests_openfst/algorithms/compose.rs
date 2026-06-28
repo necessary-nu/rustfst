@@ -74,11 +74,8 @@ where
     config.connect = false;
     config.compose_filter = filter;
 
-    let fst_res_static: VectorFst<_> = compose_with_config::<W, VectorFst<_>, VectorFst<_>, _, _, _>(
-        Arc::new(fst_raw.clone()),
-        Arc::new(compose_test_data.fst_2.clone()),
-        config,
-    )?;
+    let fst_res_static: VectorFst<_> =
+        compose_with_config(fst_raw, &compose_test_data.fst_2, config)?;
 
     test_eq_fst(
         &compose_test_data.result,

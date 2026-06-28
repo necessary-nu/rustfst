@@ -71,9 +71,7 @@ impl BinaryFstAlgorithm for ComposeAlgorithm {
         mut fst_2: VectorFst<TropicalWeight>,
     ) -> Result<VectorFst<TropicalWeight>> {
         match self.compose_type {
-            ComposeType::Default => {
-                compose::<TropicalWeight, VectorFst<_>, VectorFst<_>, _, _, _>(&fst_1, &fst_2)
-            }
+            ComposeType::Default => compose(&fst_1, &fst_2),
             ComposeType::LookAhead => {
                 type TLaFst<'a, S, F> = MatcherFst<
                     S,

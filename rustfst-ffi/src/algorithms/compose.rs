@@ -319,14 +319,7 @@ pub unsafe extern "C" fn fst_compose(
         let vec_fst2: &VectorFst<TropicalWeight> = fst_2
             .downcast_ref()
             .ok_or_else(|| anyhow!("Could not downcast to vector FST"))?;
-        let fst: VectorFst<TropicalWeight> = compose::<
-            TropicalWeight,
-            VectorFst<TropicalWeight>,
-            VectorFst<TropicalWeight>,
-            _,
-            _,
-            _,
-        >(vec_fst1, vec_fst2)?;
+        let fst: VectorFst<TropicalWeight> = compose(vec_fst1, vec_fst2)?;
         let fst_ptr = CFst(Box::new(fst)).into_raw_pointer();
         unsafe { *composition_ptr = fst_ptr };
         Ok(())
@@ -357,14 +350,7 @@ pub unsafe extern "C" fn fst_compose_with_config(
             <CComposeConfig as ffi_convert::RawBorrow<CComposeConfig>>::raw_borrow(config)?
         };
         let fst: VectorFst<TropicalWeight> =
-            compose_with_config::<
-                TropicalWeight,
-                VectorFst<TropicalWeight>,
-                VectorFst<TropicalWeight>,
-                _,
-                _,
-                _,
-            >(vec_fst1, vec_fst2, compose_config.as_rust()?)?;
+            compose_with_config(vec_fst1, vec_fst2, compose_config.as_rust()?)?;
         let fst_ptr = CFst(Box::new(fst)).into_raw_pointer();
         unsafe { *composition_ptr = fst_ptr };
         Ok(())

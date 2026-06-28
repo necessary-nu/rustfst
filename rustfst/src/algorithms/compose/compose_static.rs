@@ -163,7 +163,27 @@ macro_rules! compose_generate_matchers {
     };
 }
 
+/// Computes the composition of two transducers using `config`. See [`compose`]
+/// for the semantics; this variant lets you tune the matchers, compose filter and
+/// connection behaviour through [`ComposeConfig`].
 pub fn compose_with_config<
+    W: Semiring,
+    F1: ExpandedFst<W>,
+    F2: ExpandedFst<W>,
+    F3: MutableFst<W> + AllocableFst<W>,
+>(
+    fst1: &F1,
+    fst2: &F2,
+    config: ComposeConfig,
+) -> Result<F3> {
+    // Pin the inner FST types to `F1`/`F2` and use `&F1`/`&F2` as the `Borrow`
+    // values. This is what lets callers write `compose_with_config(&a, &b, cfg)`
+    // with no turbofish: the public signature takes concrete references, while the
+    // `Borrow`-generic machinery (needed by the lazy `ComposeFst`) stays internal.
+    compose_with_config_borrow::<W, F1, F2, &F1, &F2, F3>(fst1, fst2, config)
+}
+
+pub(crate) fn compose_with_config_borrow<
     W: Semiring,
     F1: ExpandedFst<W>,
     F2: ExpandedFst<W>,
@@ -285,7 +305,7 @@ pub fn compose_with_config<
 ///
 /// let fst_ref : VectorFst<IntegerWeight> = fst![1,2 => 3,4];
 ///
-/// let composed_fst : VectorFst<_> = compose(fst_1, fst_2)?;
+/// let composed_fst : VectorFst<_> = compose(&fst_1, &fst_2)?;
 /// assert_eq!(composed_fst, fst_ref);
 /// # Ok(())
 /// # }
@@ -295,11 +315,9 @@ pub fn compose<
     F1: ExpandedFst<W>,
     F2: ExpandedFst<W>,
     F3: MutableFst<W> + AllocableFst<W>,
-    B1: Borrow<F1> + Debug + Clone,
-    B2: Borrow<F2> + Debug + Clone,
 >(
-    fst1: B1,
-    fst2: B2,
+    fst1: &F1,
+    fst2: &F2,
 ) -> Result<F3> {
     let config = ComposeConfig::default();
     compose_with_config(fst1, fst2, config)
