@@ -199,9 +199,11 @@ where
 #[cfg(test)]
 mod tests {
     use crate::fst_impls::VectorFst;
+    use crate::fst_traits::CoreFst;
     use crate::semirings::TropicalWeight;
     use crate::tr::Tr;
     use crate::Semiring;
+    use crate::StateId;
     use crate::SymbolTable;
     use proptest::prelude::any;
     use proptest::proptest;
@@ -268,6 +270,46 @@ mod tests {
         let determinized_fst: VectorFst<TropicalWeight> = determinize(&input_fst)?;
 
         assert_eq!(determinized_fst, ref_fst);
+        Ok(())
+    }
+
+    // Regression test for upstream issue #288: `determinize` must not blow up the
+    // state count relative to OpenFST. This is the reporter's exact input (a 4-state
+    // nondeterministic acceptor; states 2 and 3 are final). OpenFST's `Determinize`
+    // yields 6 states / 36 transitions. Before the subset-canonicalization fix the
+    // unmerged subsets exploded to 14 states / 84 transitions.
+    #[test]
+    fn test_determinize_issue_288_no_blowup() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s: Vec<_> = (0..4).map(|_| fst.add_state()).collect();
+        fst.set_start(s[0])?;
+        fst.set_final(s[2], TropicalWeight::one())?;
+        fst.set_final(s[3], TropicalWeight::one())?;
+
+        // state 0: a label-5 transition to state 1 *and* a label-5 self-loop make
+        // the acceptor nondeterministic; labels 1..6 self-loop on state 0.
+        fst.add_tr(s[0], Tr::new(5, 5, 0.0, s[1]))?;
+        for l in [4, 3, 2, 1, 6, 5] {
+            fst.add_tr(s[0], Tr::new(l, l, 0.0, s[0]))?;
+        }
+        fst.add_tr(s[1], Tr::new(6, 6, 0.0, s[2]))?;
+        for l in [4, 3, 2, 1, 6, 5] {
+            fst.add_tr(s[2], Tr::new(l, l, 0.0, s[3]))?;
+            fst.add_tr(s[3], Tr::new(l, l, 0.0, s[3]))?;
+        }
+
+        let det: VectorFst<TropicalWeight> = determinize(&fst)?;
+
+        let num_trs: usize = (0..det.num_states())
+            .map(|st| det.num_trs(st as StateId).unwrap())
+            .sum();
+        assert_eq!(
+            det.num_states(),
+            6,
+            "issue #288: determinize blew up the state count (got {}, OpenFST gives 6)",
+            det.num_states()
+        );
+        assert_eq!(num_trs, 36);
         Ok(())
     }
 
