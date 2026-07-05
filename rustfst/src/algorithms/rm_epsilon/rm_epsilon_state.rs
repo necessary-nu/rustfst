@@ -44,9 +44,11 @@ impl<W: Semiring, Q: Queue> RmEpsilonState<W, Q> {
         source: StateId,
         fst: B,
     ) -> Result<(Vec<Tr<W>>, W)> {
-        let distance = self
-            .sd_state
-            .shortest_distance::<F, _>(Some(source), fst.borrow())?;
+        // The distances stay in the retained sd_state buffer; expand is called
+        // once per state, so copying them out here made rm-epsilon O(n^2) in
+        // memory traffic (this was ~2/3 of the whole sma pmatch2fst profile).
+        self.sd_state
+            .shortest_distance_in_place::<F, _>(Some(source), fst.borrow())?;
 
         let tr_filter = EpsilonTrFilter {};
 
@@ -66,7 +68,10 @@ impl<W: Semiring, Q: Queue> RmEpsilonState<W, Q> {
             for tr in fst.borrow().get_trs(state)?.trs() {
                 // TODO: Remove this clone
                 let mut tr = tr.clone();
-                tr.weight = distance[state as usize].times(&tr.weight)?;
+                tr.weight = self
+                    .sd_state
+                    .distance_ref(state as usize)
+                    .times(&tr.weight)?;
                 if tr_filter.keep(&tr) {
                     while self.visited.len() <= (tr.nextstate as usize) {
                         self.visited.push(false);
@@ -104,7 +109,8 @@ impl<W: Semiring, Q: Queue> RmEpsilonState<W, Q> {
                 }
             }
             final_weight.plus_assign(
-                distance[state as usize]
+                self.sd_state
+                    .distance_ref(state as usize)
                     .times(fst.borrow().final_weight(state)?.unwrap_or_else(W::zero))?,
             )?;
         }

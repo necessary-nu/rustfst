@@ -150,14 +150,34 @@ impl<W: Semiring, Q: Queue, A: TrFilter<W>> ShortestDistanceState<W, Q, A> {
         }
     }
 
-    pub fn shortest_distance<F: ExpandedFst<W>, B: Borrow<F>>(
+    /// The computed distance of `state`, valid after
+    /// [`Self::shortest_distance_in_place`] for states touched by that pass
+    /// (in retain mode, untouched entries hold stale values from earlier
+    /// sources, exactly as the former returned-by-value vector did).
+    pub fn distance_ref(&self, state: usize) -> &W {
+        &self.distance[state]
+    }
+
+    /// Run the shortest-distance pass, leaving the result in the internal
+    /// `distance` buffer (read via [`Self::distance_ref`]). This is the whole
+    /// algorithm; the per-call `Vec` clone it used to return was O(states) and
+    /// made rm-epsilon quadratic in memory traffic on large FSTs.
+    pub fn shortest_distance_in_place<F: ExpandedFst<W>, B: Borrow<F>>(
         &mut self,
         source: Option<StateId>,
         fst: B,
-    ) -> Result<Vec<W>> {
+    ) -> Result<()> {
         let start_state = match fst.borrow().start() {
             Some(start_state) => start_state,
-            None => return Ok(vec![]),
+            None => {
+                if !self.retain {
+                    self.distance.clear();
+                    self.adder.clear();
+                    self.radder.clear();
+                    self.enqueued.clear();
+                }
+                return Ok(());
+            }
         };
         let weight_properties = W::properties();
         if !weight_properties.contains(SemiringProperties::RIGHT_SEMIRING) {
@@ -231,8 +251,7 @@ impl<W: Semiring, Q: Queue, A: TrFilter<W>> ShortestDistanceState<W, Q, A> {
             }
         }
         self.source_id += 1;
-        // TODO: This clone could be avoided
-        Ok(self.distance.clone())
+        Ok(())
     }
 }
 
@@ -248,7 +267,9 @@ pub(crate) fn shortest_distance_with_internal_config<
     let source = opts.source;
     let mut sd_state =
         ShortestDistanceState::<_, _, _>::new_from_config(fst.num_states(), opts, false);
-    sd_state.shortest_distance::<F, _>(source, fst)
+    sd_state.shortest_distance_in_place::<F, _>(source, fst)?;
+    // One-shot state: hand the buffer out by move instead of by copy.
+    Ok(std::mem::take(&mut sd_state.distance))
 }
 
 /// Configuration for shortest distance computation
