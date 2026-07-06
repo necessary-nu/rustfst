@@ -26,6 +26,15 @@ impl<W: Semiring> DecodeMapper<W> {
 
 impl<W: Semiring> TrMapper<W> for DecodeMapper<W> {
     fn tr_map(&self, tr: &mut Tr<W>) -> Result<()> {
+        // Encoded labels are keys >= 1 (the encode table returns id + 1), so an
+        // ilabel of 0 is never an encoded arc — it is a genuine epsilon added
+        // after encoding (e.g. the superfinal epsilon arcs an encode with
+        // MapRequireSuperfinal introduces, which `rm_final_epsilon` below then
+        // clears). OpenFST's decoder leaves such arcs untouched; decoding them
+        // would fail the table lookup.
+        if tr.ilabel == 0 {
+            return Ok(());
+        }
         let tuple = self
             .encode_table
             .0
