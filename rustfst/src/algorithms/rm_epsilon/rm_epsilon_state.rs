@@ -9,6 +9,7 @@ use crate::algorithms::shortest_distance::ShortestDistanceState;
 use crate::algorithms::tr_filters::{EpsilonTrFilter, TrFilter};
 use crate::algorithms::Queue;
 use crate::fst_traits::ExpandedFst;
+use crate::fx_hasher::FxBuildHasher;
 use crate::semirings::Semiring;
 use crate::{StateId, Tr, Trs};
 
@@ -16,7 +17,8 @@ use crate::{StateId, Tr, Trs};
 pub(crate) struct RmEpsilonState<W: Semiring, Q: Queue> {
     pub visited: Vec<bool>,
     pub visited_states: Vec<StateId>,
-    pub element_map: HashMap<Element, (StateId, usize)>,
+    // Entry-probed only (never iterated), so the hasher cannot affect output.
+    pub element_map: HashMap<Element, (StateId, usize), FxBuildHasher>,
     pub expand_id: StateId,
     pub sd_state: ShortestDistanceState<W, Q, EpsilonTrFilter>,
 }
@@ -34,7 +36,7 @@ impl<W: Semiring, Q: Queue> RmEpsilonState<W, Q> {
             sd_state: ShortestDistanceState::new_from_config(fst_num_states, opts.sd_opts, true),
             visited: vec![],
             visited_states: vec![],
-            element_map: HashMap::new(),
+            element_map: HashMap::default(),
             expand_id: 0,
         }
     }

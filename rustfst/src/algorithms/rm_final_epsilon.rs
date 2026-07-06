@@ -7,6 +7,7 @@ use crate::algorithms::dfs_visit::dfs_visit;
 use crate::algorithms::tr_filters::AnyTrFilter;
 use crate::algorithms::visitors::SccVisitor;
 use crate::fst_traits::MutableFst;
+use crate::fx_hasher::FxBuildHasher;
 use crate::semirings::Semiring;
 use crate::{Trs, EPS_LABEL};
 
@@ -19,7 +20,8 @@ where
     let mut visitors = SccVisitor::new(ifst, false, true);
     dfs_visit(ifst, &mut visitors, &AnyTrFilter {}, false);
 
-    let mut finals = HashSet::new();
+    // Membership-only (never iterated), so the hasher cannot affect output.
+    let mut finals: HashSet<_, FxBuildHasher> = HashSet::default();
 
     for s in ifst.states_range() {
         if unsafe { ifst.is_final_unchecked(s) } {

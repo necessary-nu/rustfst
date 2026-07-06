@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use crate::algorithms::encode::EncodeType;
 use crate::algorithms::FinalTr;
+use crate::fx_hasher::FxBuildHasher;
 use crate::{Label, Semiring, Tr, EPS_LABEL};
 use std::collections::hash_map::Entry;
 
@@ -17,7 +18,9 @@ pub struct EncodeTableMut<W: Semiring> {
     pub encode_type: EncodeType,
     // FIXME : Store references ?
     id_to_tuple: Vec<EncodeTuple<W>>,
-    tuple_to_id: HashMap<EncodeTuple<W>, usize>,
+    // Ids come from insertion order and the map is only ever probed by key, so
+    // the hasher cannot affect any output.
+    tuple_to_id: HashMap<EncodeTuple<W>, usize, FxBuildHasher>,
 }
 
 pub struct EncodeTable<W: Semiring>(pub RefCell<EncodeTableMut<W>>);
@@ -27,7 +30,7 @@ impl<W: Semiring> EncodeTableMut<W> {
         EncodeTableMut {
             encode_type,
             id_to_tuple: vec![],
-            tuple_to_id: HashMap::new(),
+            tuple_to_id: HashMap::default(),
         }
     }
 
