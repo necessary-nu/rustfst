@@ -240,6 +240,9 @@ pub const EPS_SYMBOL: &str = "<eps>";
 /// A few utilities to manipulate wFSTs.
 pub mod utils;
 
+/// Fast non-cryptographic hasher for internal, order-insensitive hash tables.
+pub(crate) mod fx_hasher;
+
 /// Provides algorithms that are generic to all Fst.
 pub mod algorithms;
 

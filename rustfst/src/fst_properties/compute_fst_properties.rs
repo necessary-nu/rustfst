@@ -7,8 +7,9 @@ use crate::algorithms::tr_filters::AnyTrFilter;
 use crate::algorithms::visitors::SccVisitor;
 use crate::fst_properties::{known_properties, FstProperties};
 use crate::fst_traits::ExpandedFst;
+use crate::fx_hasher::FxBuildHasher;
 use crate::semirings::Semiring;
-use crate::{StateId, Tr, Trs};
+use crate::{Label, StateId, Tr, Trs};
 
 /// Computes all the FstProperties of the FST bit don't attach them to the FST.
 pub fn compute_fst_properties<W: Semiring, F: ExpandedFst<W>>(
@@ -78,19 +79,25 @@ pub fn compute_fst_properties<W: Semiring, F: ExpandedFst<W>>(
         }
 
         let mut nfinal = 0;
+        // One scratch set per direction, reused across states: a fresh SipHash
+        // HashSet per state dominated this function on million-state FSTs.
+        let track_ilabels =
+            mask.intersects(FstProperties::I_DETERMINISTIC | FstProperties::NOT_I_DETERMINISTIC);
+        let track_olabels =
+            mask.intersects(FstProperties::O_DETERMINISTIC | FstProperties::NOT_O_DETERMINISTIC);
+        let mut ilabels_scratch: HashSet<Label, FxBuildHasher> = HashSet::default();
+        let mut olabels_scratch: HashSet<Label, FxBuildHasher> = HashSet::default();
         for state in 0..fst.num_states() {
             let state = state as StateId;
-            let mut ilabels = if mask
-                .intersects(FstProperties::I_DETERMINISTIC | FstProperties::NOT_I_DETERMINISTIC)
-            {
-                Some(HashSet::new())
+            let mut ilabels = if track_ilabels {
+                ilabels_scratch.clear();
+                Some(&mut ilabels_scratch)
             } else {
                 None
             };
-            let mut olabels = if mask
-                .intersects(FstProperties::O_DETERMINISTIC | FstProperties::NOT_O_DETERMINISTIC)
-            {
-                Some(HashSet::new())
+            let mut olabels = if track_olabels {
+                olabels_scratch.clear();
+                Some(&mut olabels_scratch)
             } else {
                 None
             };

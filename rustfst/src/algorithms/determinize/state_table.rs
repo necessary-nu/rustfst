@@ -4,6 +4,7 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::algorithms::determinize::{DeterminizeStateTuple, WeightedSubset};
+use crate::fx_hasher::FxBuildHasher;
 use crate::{Semiring, StateId};
 use anyhow::Result;
 
@@ -14,7 +15,10 @@ struct InnerDeterminizeStateTable<W: Semiring, B: Borrow<[W]>> {
     // former bimap kept two full directional maps and its find_tuple cloned
     // the whole weighted subset per state expansion.
     id_to_tuple: Vec<Arc<DeterminizeStateTuple<W>>>,
-    tuple_to_id: HashMap<Arc<DeterminizeStateTuple<W>>, StateId>,
+    // State ids come from insertion order (the Vec), never from map iteration,
+    // so the hasher cannot influence the output; SipHash was ~5% of the whole
+    // determinize profile hashing large weighted subsets.
+    tuple_to_id: HashMap<Arc<DeterminizeStateTuple<W>>, StateId, FxBuildHasher>,
     // Distance to final NFA states.
     in_dist: Option<B>,
     // Distance to final DFA states.
@@ -61,7 +65,7 @@ impl<W: Semiring, B: Borrow<[W]>> DeterminizeStateTable<W, B> {
             in_dist,
             out_dist: vec![],
             id_to_tuple: Vec::new(),
-            tuple_to_id: HashMap::new(),
+            tuple_to_id: HashMap::default(),
         }))
     }
 
