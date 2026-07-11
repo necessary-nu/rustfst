@@ -224,6 +224,25 @@ where
 
     /// Turns the Lazy FST into a static one.
     pub fn compute<F2: MutableFst<W> + AllocableFst<W>>(&self) -> Result<F2> {
+        self.compute_bounded(None)
+    }
+
+    /// Materialize the lazy FST into a static one, optionally aborting once more
+    /// than `max_states` states have been produced.
+    ///
+    /// With `max_states == None` this is unbounded and behaves identically to
+    /// [`Self::compute`]. When a bound is supplied and the on-demand expansion
+    /// produces more than that many states, the computation returns an `Err`
+    /// instead of running away. This is the escape hatch for lazy operations
+    /// (e.g. weighted determinization of a non-twins cyclic FST) that may never
+    /// terminate: the caller can catch the error and retry with a different
+    /// strategy. The bound counts states discovered during the BFS, so the same
+    /// input that terminates unbounded produces byte-identical output as long as
+    /// the bound is not tripped.
+    pub fn compute_bounded<F2: MutableFst<W> + AllocableFst<W>>(
+        &self,
+        max_states: Option<usize>,
+    ) -> Result<F2> {
         let start_state = self.start();
         let mut fst_out = F2::new();
         let start_state = match start_state {
@@ -236,6 +255,7 @@ where
         let mut visited_states = vec![];
         visited_states.resize(start_state as usize + 1, false);
         visited_states[start_state as usize] = true;
+        let mut num_discovered: usize = 1;
         queue.push_back(start_state);
         while let Some(s) = queue.pop_front() {
             let trs_owner = self.get_trs(s)?;
@@ -246,6 +266,16 @@ where
                 if !visited_states[tr.nextstate as usize] {
                     queue.push_back(tr.nextstate);
                     visited_states[tr.nextstate as usize] = true;
+                    num_discovered += 1;
+                    if let Some(bound) = max_states {
+                        if num_discovered > bound {
+                            bail!(
+                                "compute_bounded: state budget of {} exceeded (lazy FST did not \
+                                 converge)",
+                                bound
+                            );
+                        }
+                    }
                 }
                 let n = fst_out.num_states();
                 if (tr.nextstate as usize) >= n {

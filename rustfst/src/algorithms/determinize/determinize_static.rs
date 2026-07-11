@@ -38,7 +38,11 @@ where
     fst.compute_with_distance()
 }
 
-pub fn determinize_fsa<W, F1, F2, CD>(fst_in: &F1, delta: f32) -> Result<F2>
+pub fn determinize_fsa<W, F1, F2, CD>(
+    fst_in: &F1,
+    delta: f32,
+    max_states: Option<usize>,
+) -> Result<F2>
 where
     W: WeaklyDivisibleSemiring + WeightQuantize,
     F1: Fst<W>,
@@ -49,10 +53,15 @@ where
         bail!("determinize_fsa : weight must be left distributive")
     }
     let det_fsa: DeterminizeFsa<W, F1, CD, _, Vec<W>> = DeterminizeFsa::new(fst_in, None, delta)?;
-    det_fsa.compute()
+    det_fsa.compute_bounded(max_states)
 }
 
-pub fn determinize_fst<W, F1, F2>(fst_in: &F1, det_type: DeterminizeType, delta: f32) -> Result<F2>
+pub fn determinize_fst<W, F1, F2>(
+    fst_in: &F1,
+    det_type: DeterminizeType,
+    delta: f32,
+    max_states: Option<usize>,
+) -> Result<F2>
 where
     W: WeaklyDivisibleSemiring + WeightQuantize + 'static,
     F1: ExpandedFst<W>,
@@ -80,7 +89,9 @@ where
             let fsa: VectorFst<GallicWeightMin<W>> =
                 weight_convert(fst_in.borrow(), &mut to_gallic)?;
             let determinized_fsa: VectorFst<GallicWeightMin<W>> =
-                determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(&fsa, delta)?;
+                determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(
+                    &fsa, delta, max_states,
+                )?;
             let factored_determinized_fsa: VectorFst<GallicWeightMin<W>> =
                 factor_weight::<_, VectorFst<GallicWeightMin<W>>, _, _, GallicFactorMin<W>>(
                     &determinized_fsa,
@@ -92,7 +103,9 @@ where
             let fsa: VectorFst<GallicWeightRestrict<W>> =
                 weight_convert(fst_in.borrow(), &mut to_gallic)?;
             let determinized_fsa: VectorFst<GallicWeightRestrict<W>> =
-                determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(&fsa, delta)?;
+                determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(
+                    &fsa, delta, max_states,
+                )?;
             let factored_determinized_fsa: VectorFst<GallicWeightRestrict<W>> =
                 factor_weight::<
                     _,
@@ -106,7 +119,9 @@ where
         DeterminizeType::DeterminizeNonFunctional => {
             let fsa: VectorFst<GallicWeight<W>> = weight_convert(fst_in.borrow(), &mut to_gallic)?;
             let determinized_fsa: VectorFst<GallicWeight<W>> =
-                determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(&fsa, delta)?;
+                determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(
+                    &fsa, delta, max_states,
+                )?;
             let factored_determinized_fsa: VectorFst<GallicWeight<W>> =
                 factor_weight::<_, VectorFst<GallicWeight<W>>, _, _, GallicFactor<W>>(
                     &determinized_fsa,
@@ -121,11 +136,23 @@ where
 pub struct DeterminizeConfig {
     pub delta: f32,
     pub det_type: DeterminizeType,
+    /// Optional upper bound on the number of states produced by the
+    /// determinization. `None` (the default) is unbounded — today's behavior.
+    /// When `Some(n)`, if the on-demand expansion produces more than `n` states,
+    /// determinization returns an `Err` instead of running away. This gives
+    /// callers an escape hatch for inputs on which weighted determinization does
+    /// not terminate (e.g. non-twins cyclic FSTs). Any input that converges
+    /// within the bound produces byte-identical output to the unbounded run.
+    pub max_states: Option<usize>,
 }
 
 impl DeterminizeConfig {
     pub fn new(delta: f32, det_type: DeterminizeType) -> Self {
-        Self { delta, det_type }
+        Self {
+            delta,
+            det_type,
+            max_states: None,
+        }
     }
 
     pub fn with_delta(self, delta: f32) -> Self {
@@ -135,6 +162,10 @@ impl DeterminizeConfig {
     pub fn with_det_type(self, det_type: DeterminizeType) -> Self {
         Self { det_type, ..self }
     }
+
+    pub fn with_max_states(self, max_states: Option<usize>) -> Self {
+        Self { max_states, ..self }
+    }
 }
 
 impl Default for DeterminizeConfig {
@@ -142,6 +173,7 @@ impl Default for DeterminizeConfig {
         Self {
             delta: KDELTA,
             det_type: DeterminizeType::DeterminizeFunctional,
+            max_states: None,
         }
     }
 }
@@ -177,11 +209,12 @@ where
 {
     let delta = config.delta;
     let det_type = config.det_type;
+    let max_states = config.max_states;
     let iprops = fst_in.borrow().properties();
     let mut fst_res: F2 = if iprops.contains(FstProperties::ACCEPTOR) {
-        determinize_fsa::<_, F1, _, DefaultCommonDivisor>(fst_in, delta)?
+        determinize_fsa::<_, F1, _, DefaultCommonDivisor>(fst_in, delta, max_states)?
     } else {
-        determinize_fst(fst_in, det_type, delta)?
+        determinize_fst(fst_in, det_type, delta, max_states)?
     };
 
     let distinct_psubsequential_labels = !(det_type == DeterminizeType::DeterminizeNonFunctional);
@@ -310,6 +343,54 @@ mod tests {
             det.num_states()
         );
         assert_eq!(num_trs, 36);
+        Ok(())
+    }
+
+    // Byte-identity invariant for the `max_states` bound: on an input that
+    // converges, a generous bound must produce EXACTLY the same FST as the
+    // unbounded run (the bound only guards runaway expansions).
+    #[test]
+    fn test_determinize_max_states_byte_identical_when_within_budget() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s: Vec<_> = (0..4).map(|_| fst.add_state()).collect();
+        fst.set_start(s[0])?;
+        fst.set_final(s[3], TropicalWeight::one())?;
+        fst.add_tr(s[0], Tr::new(1, 1, 2.0, s[1]))?;
+        fst.add_tr(s[0], Tr::new(1, 1, 3.0, s[2]))?;
+        fst.add_tr(s[1], Tr::new(2, 2, 4.0, s[3]))?;
+        fst.add_tr(s[2], Tr::new(2, 2, 3.0, s[3]))?;
+
+        let unbounded: VectorFst<TropicalWeight> = determinize(&fst)?;
+        let bounded: VectorFst<TropicalWeight> = determinize_with_config(
+            &fst,
+            DeterminizeConfig::default().with_max_states(Some(1_000_000)),
+        )?;
+        assert_eq!(
+            unbounded, bounded,
+            "a generous state budget must not perturb a converging determinization"
+        );
+        Ok(())
+    }
+
+    // The bound actually trips: a tiny budget on a determinization that produces
+    // more states than the budget returns an Err instead of the FST.
+    #[test]
+    fn test_determinize_max_states_trips() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s: Vec<_> = (0..4).map(|_| fst.add_state()).collect();
+        fst.set_start(s[0])?;
+        fst.set_final(s[3], TropicalWeight::one())?;
+        fst.add_tr(s[0], Tr::new(1, 1, 2.0, s[1]))?;
+        fst.add_tr(s[0], Tr::new(1, 1, 3.0, s[2]))?;
+        fst.add_tr(s[1], Tr::new(2, 2, 4.0, s[3]))?;
+        fst.add_tr(s[2], Tr::new(2, 2, 3.0, s[3]))?;
+
+        let res: Result<VectorFst<TropicalWeight>> =
+            determinize_with_config(&fst, DeterminizeConfig::default().with_max_states(Some(1)));
+        assert!(
+            res.is_err(),
+            "a budget of 1 must abort this determinization"
+        );
         Ok(())
     }
 

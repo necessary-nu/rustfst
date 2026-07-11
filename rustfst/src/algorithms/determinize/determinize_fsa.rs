@@ -159,6 +159,15 @@ where
         self.0.compute()
     }
 
+    /// Turns the Lazy FST into a static one, aborting with an `Err` if the
+    /// expansion produces more than `max_states` states (`None` = unbounded).
+    pub fn compute_bounded<F2: MutableFst<W> + AllocableFst<W>>(
+        &self,
+        max_states: Option<usize>,
+    ) -> Result<F2> {
+        self.0.compute_bounded(max_states)
+    }
+
     pub fn out_dist(self) -> Result<Vec<W>> {
         self.0.op.out_dist()
     }
