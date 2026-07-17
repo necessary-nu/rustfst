@@ -41,7 +41,7 @@ impl<W: Semiring> TrsVec<W> {
 
 impl<W: Semiring> Clone for TrsVec<W> {
     fn clone(&self) -> Self {
-        Self(Arc::new((*self.0).clone()))
+        Self(Arc::clone(&self.0))
     }
 }
 
