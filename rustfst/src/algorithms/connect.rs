@@ -49,6 +49,18 @@ use crate::NO_STATE_ID;
 /// ![connect_out](https://raw.githubusercontent.com/Garvys/rustfst-images-doc/master/images/connect_out.svg?sanitize=true)
 ///
 pub fn connect<W: Semiring, F: ExpandedFst<W> + MutableFst<W>>(fst: &mut F) -> Result<()> {
+    // A machine already known trim is a no-op: the visitor would find every
+    // state accessible and coaccessible and delete nothing. The property bits
+    // are maintained conservatively by every mutation (known-true only when
+    // true), so trusting them here cannot change the output. This matters in
+    // op chains like rm_epsilon → encode → determinize → minimize, where each
+    // step stamps or preserves trimness and the next re-ran the full DFS.
+    if fst
+        .properties()
+        .contains(FstProperties::ACCESSIBLE | FstProperties::COACCESSIBLE)
+    {
+        return Ok(());
+    }
     let mut visitor = ConnectVisitor::new(fst);
     dfs_visit(fst, &mut visitor, &AnyTrFilter {}, false);
     let mut dstates = Vec::with_capacity(visitor.access.len());

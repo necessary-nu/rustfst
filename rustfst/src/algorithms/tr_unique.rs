@@ -44,6 +44,16 @@ pub fn tr_unique<W: Semiring, F: MutableFst<W>>(ifst: &mut F) {
     }
     let mut outprops =
         props & FstProperties::arcsort_properties() & FstProperties::delete_arcs_properties();
+    // Removing a duplicate arc never changes reachability — an identical arc
+    // remains — so accessibility knowledge survives where the generic
+    // delete-arcs mask must assume the worst. This keeps a minimized machine
+    // stamped trim through the decode that follows, letting its connect
+    // no-op instead of re-running the full DFS.
+    outprops |= props
+        & (FstProperties::ACCESSIBLE
+            | FstProperties::NOT_ACCESSIBLE
+            | FstProperties::COACCESSIBLE
+            | FstProperties::NOT_COACCESSIBLE);
     if ifst.num_states() == 0 {
         outprops |= FstProperties::null_properties();
     }
