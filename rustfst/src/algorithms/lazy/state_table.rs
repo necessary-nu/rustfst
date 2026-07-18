@@ -2,9 +2,9 @@ use std::fmt;
 use std::hash::Hash;
 use std::sync::Mutex;
 
+use crate::fx_hasher::FxBuildHasher;
 use crate::StateId;
 use std::collections::hash_map::Entry;
-use std::collections::hash_map::RandomState;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
@@ -17,7 +17,11 @@ use std::io::Write;
 use anyhow::{anyhow, Result};
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct BiHashMap<T: Hash + Eq + Clone, H: BuildHasher = RandomState> {
+pub(crate) struct BiHashMap<T: Hash + Eq + Clone, H: BuildHasher = FxBuildHasher> {
+    // State ids come from insertion order (the id_to_tuple Vec), never from map
+    // iteration, so the hasher cannot influence the output. SipHash's DoS
+    // resistance buys nothing here and its per-write cost showed up under
+    // lazy::state_table::StateTable::find_id in compose workloads.
     tuple_to_id: HashMap<T, StateId, H>,
     id_to_tuple: Vec<T>,
 }
@@ -31,7 +35,7 @@ impl<T: Hash + Eq + Clone, H: BuildHasher> PartialEq for BiHashMap<T, H> {
 impl<T: Hash + Eq + Clone> BiHashMap<T> {
     pub fn new() -> Self {
         Self {
-            tuple_to_id: HashMap::new(),
+            tuple_to_id: HashMap::default(),
             id_to_tuple: Vec::new(),
         }
     }
@@ -132,7 +136,7 @@ impl<T: SerializeBinary + Hash + Eq + Clone> SerializeBinary for StateTable<T> {
             tuple_to_id_len as usize,
             tuple_to_id_len as usize,
             parse_tuple_to_id,
-            HashMap::<T, StateId>::new,
+            HashMap::<T, StateId, FxBuildHasher>::default,
             |mut acc, item| {
                 acc.insert(item.0, item.1);
                 acc
