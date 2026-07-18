@@ -1,6 +1,6 @@
 use crate::algorithms::determinize::divisors::CommonDivisor;
 use crate::algorithms::determinize::DeterminizeFsaOp;
-use crate::algorithms::lazy::{LazyFst, SimpleHashMapCache};
+use crate::algorithms::lazy::{LazyFst, UnsyncHashMapCache};
 use crate::fst_properties::FstProperties;
 use crate::fst_traits::{AllocableFst, CoreFst, Fst, FstIterator, MutableFst, StateIterator};
 use crate::semirings::{WeaklyDivisibleSemiring, WeightQuantize};
@@ -11,8 +11,12 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+// `DeterminizeFsa` is an internal one-shot type: the static `determinize` entry
+// points build it, materialize it once on the calling thread, and drop it. It is
+// never shared across threads, so it uses the single-threaded `UnsyncHashMapCache`
+// (RefCell + FxHash) rather than the `Mutex` + SipHash `SimpleHashMapCache`.
 type InnerLazyFst<W, F, CD, B, BT> =
-    LazyFst<W, DeterminizeFsaOp<W, F, CD, B, BT>, SimpleHashMapCache<W>>;
+    LazyFst<W, DeterminizeFsaOp<W, F, CD, B, BT>, UnsyncHashMapCache<W>>;
 
 #[derive(Debug)]
 pub struct DeterminizeFsa<
@@ -149,7 +153,7 @@ where
         let isymt = fst.borrow().input_symbols().cloned();
         let osymt = fst.borrow().output_symbols().cloned();
         let fst_op = DeterminizeFsaOp::new(fst, in_dist, delta)?;
-        let fst_cache = SimpleHashMapCache::default();
+        let fst_cache = UnsyncHashMapCache::default();
         let lazy_fst = LazyFst::from_op_and_cache(fst_op, fst_cache, isymt, osymt);
         Ok(DeterminizeFsa(lazy_fst, PhantomData))
     }
@@ -188,10 +192,15 @@ mod test {
     use crate::fst_impls::VectorFst;
     use crate::semirings::TropicalWeight;
 
+    // `DeterminizeFsa` is a single-threaded one-shot type: the static determinize
+    // entry points build it, materialize it on the calling thread, and drop it.
+    // It uses `UnsyncHashMapCache` (RefCell), so it is intentionally `!Sync`. It
+    // stays `Send` (moving the whole value to another thread is fine; only
+    // cross-thread *sharing* is disallowed), which this test pins.
     #[test]
-    fn test_determinize_fsa_sync() {
-        fn is_sync<T: Sync>() {}
-        is_sync::<
+    fn test_determinize_fsa_send() {
+        fn is_send<T: Send>() {}
+        is_send::<
             DeterminizeFsa<
                 TropicalWeight,
                 VectorFst<_>,
