@@ -46,7 +46,12 @@ pub(crate) fn write_bin_symt<W: Write, H: BuildHasher>(
     symt: &SymbolTable<H>,
 ) -> Result<()> {
     write_bin_i32(file, SYMBOL_TABLE_MAGIC_NUMBER)?;
-    OpenFstString::new("rustfst_symboltable").write(file)?;
+    // `SymbolTable` carries no name, so any constant here is arbitrary — but
+    // OpenFST serializes the table's own name and HFST constructs its tables
+    // unnamed, so the empty string is what OpenFST-lineage tools emit and the
+    // only choice that byte-matches their output. Readers (ours included)
+    // parse and discard it.
+    OpenFstString::new("").write(file)?;
     // First field is `available_key` (the next free label = max label + 1, which
     // `len()` reports). The second field MUST be the number of rows that follow,
     // i.e. the count of real symbols — which differs from `len()` for sparse tables

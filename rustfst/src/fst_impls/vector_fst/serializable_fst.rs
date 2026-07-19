@@ -69,10 +69,6 @@ impl<W: SerializableSemiring> SerializableFst<W> for VectorFst<W> {
     }
 
     fn store<O: Write>(&self, mut output: O) -> Result<()> {
-        let num_trs: usize = (0..self.num_states())
-            .map(|s: usize| unsafe { self.num_trs_unchecked(s as StateId) })
-            .sum();
-
         let mut flags = FstFlags::empty();
         if self.input_symbols().is_some() {
             flags |= FstFlags::HAS_ISYMBOLS;
@@ -92,7 +88,12 @@ impl<W: SerializableSemiring> SerializableFst<W> for VectorFst<W> {
             properties: self.properties.bits() | VectorFst::<W>::static_properties(),
             start: self.start_state.map(|v| v as i64).unwrap_or(-1),
             num_states: self.num_states() as i64,
-            num_trs: num_trs as i64,
+            // OpenFST's `VectorFst::WriteFst` sets NumStates but never NumArcs,
+            // leaving the header field at its default 0 (arc counts live per
+            // state in the body); readers ignore it. Writing the real total
+            // here made otherwise-identical FSTs differ byte-wise from
+            // OpenFST-written files.
+            num_trs: 0,
             isymt: self.input_symbols().cloned(),
             osymt: self.output_symbols().cloned(),
         };
