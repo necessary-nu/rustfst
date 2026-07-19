@@ -15,6 +15,7 @@ use crate::algorithms::determinize::{
 use crate::algorithms::lazy::FstOp;
 use crate::fst_properties::FstProperties;
 use crate::fst_traits::Fst;
+use crate::fx_hasher::FxBuildHasher;
 use crate::semirings::{DivideType, WeaklyDivisibleSemiring, WeightQuantize};
 use crate::{Label, Semiring, StateId, Tr, Trs, TrsVec};
 
@@ -155,7 +156,12 @@ where
             det_tr.weight = CD::common_divisor(&det_tr.weight, &dest_elt.weight)?;
         }
 
-        let mut new_pairs = HashMap::new();
+        // Keyed by StateId, merged by weight; `.values()` order leaks into
+        // `pairs` below but the canonical `sort_by(state)` that follows erases
+        // it (states are unique after the merge, so the sort is a total order).
+        // The hasher therefore cannot influence the output, and this map runs
+        // once per determinize transition — FxHash removes a hot SipHash rehash.
+        let mut new_pairs = HashMap::with_hasher(FxBuildHasher::default());
         for x in &mut det_tr.dest_tuple.subset.pairs {
             match new_pairs.entry(x.state) {
                 EntryHashMap::Vacant(e) => {

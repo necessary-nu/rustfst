@@ -11,7 +11,7 @@ use crate::algorithms::compose::{
     ComposeFstOp, ComposeFstOpOptions, ComposeFstOpState, ComposeStateTuple,
 };
 use crate::algorithms::lazy::{
-    FstCache, LazyFst, SerializableCache, SerializableLazyFst, SimpleVecCache, UnsyncVecCache,
+    FstCache, LazyFst, NullCache, SerializableCache, SerializableLazyFst, SimpleVecCache,
 };
 use crate::fst_properties::FstProperties;
 use crate::fst_traits::{AllocableFst, CoreFst, Fst, FstIterator, MutableFst, StateIterator};
@@ -165,11 +165,14 @@ where
 }
 
 // `new_auto` is the static `compose` entry point's constructor: the resulting
-// `ComposeFst` is materialized once on the calling thread via `compute` and
-// dropped, never shared across threads. Pin its cache to the single-threaded
-// `UnsyncVecCache` (RefCell) so the one-shot compose path pays no per-access
-// `Mutex`. Callers that build a `ComposeFst` to keep and share still get the
-// thread-safe default `SimpleVecCache`.
+// `ComposeFst` is materialized once on the calling thread via `compute` (a
+// single BFS that touches each state's trs and final weight exactly once) and
+// dropped, never shared across threads. `ComposeFstOp` resolves every
+// `compute_trs`/`compute_final_weight` through its own state-table plus the
+// input FSTs, so the `LazyFst` cache is never read back — pin it to `NullCache`
+// (no store, no lock, no hashing) rather than a storing cache. Callers that
+// build a `ComposeFst` to keep and share still get the thread-safe default
+// `SimpleVecCache`.
 impl<W, F1, F2, B1, B2>
     ComposeFst<
         W,
@@ -188,7 +191,7 @@ impl<W, F1, F2, B1, B2>
             GenericMatcher<W, F1, B1>,
             GenericMatcher<W, F2, B2>,
         >,
-        UnsyncVecCache<W>,
+        NullCache<W>,
     >
 where
     W: Semiring,
@@ -201,7 +204,7 @@ where
         let isymt = fst1.borrow().input_symbols().cloned();
         let osymt = fst2.borrow().output_symbols().cloned();
         let compose_impl = create_base(fst1, fst2)?;
-        let fst_cache = UnsyncVecCache::default();
+        let fst_cache = NullCache::default();
         let fst = LazyFst::from_op_and_cache(compose_impl, fst_cache, isymt, osymt);
         Ok(ComposeFst(fst))
     }

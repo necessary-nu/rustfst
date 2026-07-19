@@ -27,6 +27,7 @@ use crate::algorithms::{push_weights_with_config, reverse, PushWeightsConfig};
 use crate::fst_impls::VectorFst;
 use crate::fst_properties::FstProperties;
 use crate::fst_traits::{AllocableFst, CoreFst, ExpandedFst, Fst, MutableFst};
+use crate::fx_hasher::FxBuildHasher;
 use crate::semirings::{
     GallicWeightLeft, Semiring, SemiringProperties, WeaklyDivisibleSemiring, WeightQuantize,
 };
@@ -266,11 +267,15 @@ fn merge_states<W: Semiring, F: MutableFst<W>>(
 }
 
 // Compute the height (distance) to final state
+//
+// The two state sets are membership-only (`insert`/`contains`, never iterated),
+// so their hasher cannot influence anything observable: FxHash over SipHash is
+// output-neutral here.
 pub fn fst_depth<W: Semiring, F: Fst<W>>(
     fst: &F,
     state_id_cour: StateId,
-    accessible_states: &mut HashSet<StateId>,
-    fully_examined_states: &mut HashSet<StateId>,
+    accessible_states: &mut HashSet<StateId, FxBuildHasher>,
+    fully_examined_states: &mut HashSet<StateId, FxBuildHasher>,
     heights: &mut Vec<i32>,
 ) -> Result<()> {
     accessible_states.insert(state_id_cour);
@@ -317,8 +322,8 @@ impl AcyclicMinimizer {
     }
 
     fn initialize<W: Semiring, F: MutableFst<W>>(&mut self, fst: &mut F) -> Result<()> {
-        let mut accessible_state = HashSet::new();
-        let mut fully_examined_states = HashSet::new();
+        let mut accessible_state = HashSet::with_hasher(FxBuildHasher::default());
+        let mut fully_examined_states = HashSet::with_hasher(FxBuildHasher::default());
         let mut heights = Vec::new();
         fst_depth(
             fst,
@@ -463,8 +468,15 @@ fn pre_partition<W: Semiring, F: MutableFst<W>>(
 
     let mut state_to_initial_class: Vec<StateId> = vec![0; num_states];
     {
-        let mut hash_to_class_nonfinal = HashMap::<Vec<Label>, StateId>::new();
-        let mut hash_to_class_final = HashMap::<Vec<Label>, StateId>::new();
+        // Class ids are assigned from `next_class` in first-insertion order and
+        // the maps are only probed through `entry` — never iterated — so the
+        // hasher cannot leak into the partition: FxHash over SipHash is
+        // output-neutral here. These lookups hash a whole `Vec<Label>` per
+        // state, which made SipHash a measurable slice of the Hopcroft setup.
+        let mut hash_to_class_nonfinal =
+            HashMap::<Vec<Label>, StateId, FxBuildHasher>::with_hasher(FxBuildHasher::default());
+        let mut hash_to_class_final =
+            HashMap::<Vec<Label>, StateId, FxBuildHasher>::with_hasher(FxBuildHasher::default());
 
         for (s, state_to_initial_class_s) in state_to_initial_class
             .iter_mut()

@@ -1,7 +1,8 @@
 use std::borrow::Borrow;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::algorithms::determinize::{DeterminizeStateTuple, WeightedSubset};
 use crate::fx_hasher::FxBuildHasher;
@@ -43,25 +44,33 @@ impl<W: Semiring, B: Borrow<[W]> + PartialEq> InnerDeterminizeStateTable<W, B> {
     }
 }
 
+// The table lives inside a `DeterminizeFsaOp`, inside a `DeterminizeFsa`, which
+// is a one-shot type materialized and dropped on a single thread — it is never
+// shared across threads (its `LazyFst` cache is a `NullCache` and this table is
+// its only other interior-mutable state). So the `Mutex` that used to guard the
+// inner table bought nothing but a per-`find_id`/`find_tuple` lock; a `RefCell`
+// gives the same interior mutability with no synchronization. This makes the
+// table (and hence `DeterminizeFsaOp`/`DeterminizeFsa`) `!Sync`, which is the
+// intended shape for a single-threaded one-shot value.
 pub struct DeterminizeStateTable<W: Semiring, B: Borrow<[W]>>(
-    Mutex<InnerDeterminizeStateTable<W, B>>,
+    RefCell<InnerDeterminizeStateTable<W, B>>,
 );
 
 impl<W: Semiring, B: Borrow<[W]> + fmt::Debug> fmt::Debug for DeterminizeStateTable<W, B> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:?}", self.0.lock().unwrap())
+        write!(f, "{:?}", self.0.borrow())
     }
 }
 
 impl<W: Semiring, B: Borrow<[W]> + PartialEq> PartialEq for DeterminizeStateTable<W, B> {
     fn eq(&self, other: &Self) -> bool {
-        self.0.lock().unwrap().eq(&*other.0.lock().unwrap())
+        self.0.borrow().eq(&*other.0.borrow())
     }
 }
 
 impl<W: Semiring, B: Borrow<[W]>> DeterminizeStateTable<W, B> {
     pub fn new(in_dist: Option<B>) -> Self {
-        Self(Mutex::new(InnerDeterminizeStateTable {
+        Self(RefCell::new(InnerDeterminizeStateTable {
             in_dist,
             out_dist: vec![],
             id_to_tuple: Vec::new(),
@@ -71,12 +80,12 @@ impl<W: Semiring, B: Borrow<[W]>> DeterminizeStateTable<W, B> {
 
     /// Looks up tuple from integer ID. O(1); shares the stored allocation.
     pub fn find_tuple(&self, tuple_id: StateId) -> Arc<DeterminizeStateTuple<W>> {
-        let inner = self.0.lock().unwrap();
+        let inner = self.0.borrow();
         Arc::clone(&inner.id_to_tuple[tuple_id as usize])
     }
 
     pub fn out_dist(self) -> Vec<Option<W>> {
-        let inner = self.0.into_inner().unwrap();
+        let inner = self.0.into_inner();
         inner.out_dist
     }
 }
@@ -85,7 +94,7 @@ impl<W: Semiring, B: Borrow<[W]> + PartialEq> DeterminizeStateTable<W, B> {
     /// Looks up integer ID from entry. Inserts if absent: one hash on the hit
     /// path, one hash plus one tuple clone on the miss path.
     pub fn find_id_from_ref(&self, tuple: &DeterminizeStateTuple<W>) -> Result<StateId> {
-        let mut inner = self.0.lock().unwrap();
+        let mut inner = self.0.borrow_mut();
         if let Some(id) = inner.tuple_to_id.get(tuple) {
             return Ok(*id);
         }
@@ -95,7 +104,8 @@ impl<W: Semiring, B: Borrow<[W]> + PartialEq> DeterminizeStateTable<W, B> {
                 inner.out_dist.resize(n + 1, None);
             }
             if inner.out_dist[n].is_none() {
-                inner.out_dist[n] = Some(inner.compute_distance(&tuple.subset)?);
+                let d = inner.compute_distance(&tuple.subset)?;
+                inner.out_dist[n] = Some(d);
             }
         }
         let tuple = Arc::new(tuple.clone());

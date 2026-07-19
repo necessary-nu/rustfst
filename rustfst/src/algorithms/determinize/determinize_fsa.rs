@@ -1,6 +1,6 @@
 use crate::algorithms::determinize::divisors::CommonDivisor;
 use crate::algorithms::determinize::DeterminizeFsaOp;
-use crate::algorithms::lazy::{LazyFst, UnsyncHashMapCache};
+use crate::algorithms::lazy::{LazyFst, NullCache};
 use crate::fst_properties::FstProperties;
 use crate::fst_traits::{AllocableFst, CoreFst, Fst, FstIterator, MutableFst, StateIterator};
 use crate::semirings::{WeaklyDivisibleSemiring, WeightQuantize};
@@ -12,11 +12,15 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 
 // `DeterminizeFsa` is an internal one-shot type: the static `determinize` entry
-// points build it, materialize it once on the calling thread, and drop it. It is
-// never shared across threads, so it uses the single-threaded `UnsyncHashMapCache`
-// (RefCell + FxHash) rather than the `Mutex` + SipHash `SimpleHashMapCache`.
+// points build it, materialize it once on the calling thread via
+// `compute_bounded`, and drop it. That materialization is a single BFS that
+// touches each state's trs and final weight exactly once, straight into the
+// output FST, and `DeterminizeFsaOp` resolves everything through its own
+// state-table plus the input FST — nothing ever reads a value back out of the
+// cache. So the cache stores no useful data and can be `NullCache` (no store,
+// no hashing, no lock), which is strictly less work than a storing cache.
 type InnerLazyFst<W, F, CD, B, BT> =
-    LazyFst<W, DeterminizeFsaOp<W, F, CD, B, BT>, UnsyncHashMapCache<W>>;
+    LazyFst<W, DeterminizeFsaOp<W, F, CD, B, BT>, NullCache<W>>;
 
 #[derive(Debug)]
 pub struct DeterminizeFsa<
@@ -153,7 +157,7 @@ where
         let isymt = fst.borrow().input_symbols().cloned();
         let osymt = fst.borrow().output_symbols().cloned();
         let fst_op = DeterminizeFsaOp::new(fst, in_dist, delta)?;
-        let fst_cache = UnsyncHashMapCache::default();
+        let fst_cache = NullCache::default();
         let lazy_fst = LazyFst::from_op_and_cache(fst_op, fst_cache, isymt, osymt);
         Ok(DeterminizeFsa(lazy_fst, PhantomData))
     }
@@ -194,9 +198,11 @@ mod test {
 
     // `DeterminizeFsa` is a single-threaded one-shot type: the static determinize
     // entry points build it, materialize it on the calling thread, and drop it.
-    // It uses `UnsyncHashMapCache` (RefCell), so it is intentionally `!Sync`. It
-    // stays `Send` (moving the whole value to another thread is fine; only
-    // cross-thread *sharing* is disallowed), which this test pins.
+    // Its `LazyFst` cache is a `NullCache` (`Send + Sync`), but its op's
+    // `DeterminizeStateTable` uses a `RefCell`, so the whole value is
+    // intentionally `!Sync`. It stays `Send` (moving the whole value to another
+    // thread is fine; only cross-thread *sharing* is disallowed), which this
+    // test pins.
     #[test]
     fn test_determinize_fsa_send() {
         fn is_send<T: Send>() {}
