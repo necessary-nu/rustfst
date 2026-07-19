@@ -42,26 +42,67 @@ impl CReprOf<DeterminizeType> for CDeterminizeType {
     }
 }
 
-#[derive(AsRust, CReprOf, CDrop, RawPointerConverter)]
-#[target_type(DeterminizeConfig)]
+#[derive(RawPointerConverter)]
 pub struct CDeterminizeConfig {
     delta: f32,
     det_type: CDeterminizeType,
+    // `Option` has no direct C representation (see `CSigmaMatcherConfig` for
+    // the same pattern), so the conversions are hand-written; the C
+    // constructor encodes `None` as 0 since a zero-state bound is
+    // meaningless.
+    max_states: Option<usize>,
+}
+
+impl AsRust<DeterminizeConfig> for CDeterminizeConfig {
+    fn as_rust(&self) -> Result<DeterminizeConfig, AsRustError> {
+        Ok(DeterminizeConfig {
+            delta: self.delta,
+            det_type: self.det_type.as_rust()?,
+            max_states: self.max_states,
+        })
+    }
+}
+
+impl CDrop for CDeterminizeConfig {
+    fn do_drop(&mut self) -> Result<(), CDropError> {
+        Ok(())
+    }
+}
+
+impl CReprOf<DeterminizeConfig> for CDeterminizeConfig {
+    fn c_repr_of(value: DeterminizeConfig) -> Result<CDeterminizeConfig, CReprOfError> {
+        Ok(CDeterminizeConfig {
+            delta: value.delta,
+            det_type: CDeterminizeType::c_repr_of(value.det_type)?,
+            max_states: value.max_states,
+        })
+    }
 }
 
 /// # Safety
 ///
 /// The pointers should be valid.
+///
+/// `max_states` bounds the number of states the determinization may produce;
+/// `0` means unbounded (the pre-budget behavior). A bounded run that exceeds
+/// the limit makes `fst_determinize_with_config` return an error instead of
+/// running away on inputs where weighted determinization does not terminate.
 #[no_mangle]
 pub unsafe extern "C" fn fst_determinize_config_new(
     delta: libc::c_float,
     det_type: libc::size_t,
+    max_states: libc::size_t,
     config: *mut *const CDeterminizeConfig,
 ) -> RUSTFST_FFI_RESULT {
     wrap(|| {
         let determinize_config = CDeterminizeConfig {
             delta,
             det_type: CDeterminizeType(det_type),
+            max_states: if max_states == 0 {
+                None
+            } else {
+                Some(max_states)
+            },
         };
         unsafe { *config = determinize_config.into_raw_pointer() };
         Ok(())

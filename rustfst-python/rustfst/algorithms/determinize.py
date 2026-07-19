@@ -38,12 +38,21 @@ class DeterminizeConfig:
     Struct containing the parameters controlling the determinization algorithm.
     """
 
-    def __init__(self, det_type: DeterminizeType, delta: Optional[float] = None):
+    def __init__(
+        self,
+        det_type: DeterminizeType,
+        delta: Optional[float] = None,
+        max_states: Optional[int] = None,
+    ):
         """
         Creates the configuration object.
         Args:
             det_type: Type of determinization to perform.
             delta:
+            max_states: Optional bound on the number of states the
+                determinization may produce; `None` is unbounded. A bounded
+                run that exceeds the limit raises instead of running away on
+                inputs where weighted determinization does not terminate.
         """
         if delta is None:
             delta = KDELTA
@@ -52,6 +61,7 @@ class DeterminizeConfig:
         ret_code = lib.fst_determinize_config_new(
             ctypes.c_float(delta),
             ctypes.c_size_t(det_type.value),
+            ctypes.c_size_t(0 if max_states is None else max_states),
             ctypes.byref(config),
         )
         err_msg = "Error creating DeterminizeConfig"
