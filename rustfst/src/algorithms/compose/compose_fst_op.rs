@@ -22,9 +22,11 @@ use crate::parsers::SerializeBinary;
 use crate::semirings::Semiring;
 use crate::{StateId, Tr, Trs, TrsVec, EPS_LABEL, NO_LABEL};
 
+use super::compose_state_store::{ComposeStateStore, ComposeStateStoreConfig, StateCodec};
+
 #[derive(Debug, Clone)]
 pub struct ComposeFstOpState<T: Hash + Eq + Clone> {
-    state_table: StateTable<T>,
+    state_store: ComposeStateStore<T>,
 }
 
 impl<T: Hash + Eq + Clone> Default for ComposeFstOpState<T> {
@@ -36,8 +38,38 @@ impl<T: Hash + Eq + Clone> Default for ComposeFstOpState<T> {
 impl<T: Hash + Eq + Clone> ComposeFstOpState<T> {
     pub fn new() -> Self {
         ComposeFstOpState {
-            state_table: StateTable::<T>::new(),
+            state_store: ComposeStateStore::memory(),
         }
+    }
+
+    /// Builds an operation state whose pair interner migrates to scratch once
+    /// its configured capacity-accounting ceiling would be exceeded.
+    ///
+    /// Clones share the same interner and scratch lifetime. Spillable operation
+    /// states cannot be written through the legacy lazy-FST snapshot format.
+    pub fn new_spillable(config: ComposeStateStoreConfig) -> Result<Self>
+    where
+        T: SerializeBinary,
+    {
+        Ok(Self {
+            state_store: ComposeStateStore::spillable(config, StateCodec::serializable()),
+        })
+    }
+
+    pub fn is_spilled(&self) -> Result<bool> {
+        self.state_store.is_spilled()
+    }
+
+    pub fn scratch_path(&self) -> Result<Option<std::path::PathBuf>> {
+        self.state_store.scratch_path()
+    }
+
+    fn intern(&self, tuple: T) -> Result<StateId> {
+        self.state_store.intern(tuple)
+    }
+
+    fn resolve(&self, state: StateId) -> Result<T> {
+        self.state_store.resolve(state)
     }
 }
 
@@ -51,7 +83,9 @@ impl<T: Hash + Eq + Clone + SerializeBinary> SerializableOpState for ComposeFstO
         let (_, state_table) = StateTable::<T>::parse_binary(&data)
             .map_err(|e| format_err!("Error while parsing binary StateTable : {:?}", e))?;
 
-        Ok(Self { state_table })
+        Ok(Self {
+            state_store: ComposeStateStore::Memory(state_table),
+        })
     }
 
     /// Writes a ComposeFstOpState to a file in binary format.
@@ -59,7 +93,7 @@ impl<T: Hash + Eq + Clone + SerializeBinary> SerializableOpState for ComposeFstO
         let mut file = BufWriter::new(File::create(path)?);
 
         // Write StateTable
-        self.state_table.write_binary(&mut file)?;
+        self.state_store.write_binary(&mut file)?;
         Ok(())
     }
 }
@@ -84,6 +118,7 @@ where
     properties: FstProperties,
     fst1: B1,
     fst2: B2,
+    start: Option<StateId>,
 }
 
 impl<W, F1, F2, B1, B2, M1, M2, CFB> Clone for ComposeFstOp<W, F1, F2, B1, B2, M1, M2, CFB>
@@ -105,6 +140,7 @@ where
             properties: self.properties,
             fst1: self.fst1.clone(),
             fst2: self.fst2.clone(),
+            start: self.start,
         }
     }
 }
@@ -143,11 +179,16 @@ where
             >,
         >,
     ) -> Result<Self> {
-        let matcher1 = opts.matcher1;
-        let matcher2 = opts.matcher2;
-        let compose_filter_builder = opts.filter_builder.unwrap_or_else(|| {
-            ComposeFilterBuilder::new(fst1.clone(), fst2.clone(), matcher1, matcher2).unwrap()
-        });
+        let ComposeFstOpOptions {
+            matcher1,
+            matcher2,
+            filter_builder,
+            op_state,
+        } = opts;
+        let compose_filter_builder = match filter_builder {
+            Some(builder) => builder,
+            None => CFB::new(fst1.clone(), fst2.clone(), matcher1, matcher2)?,
+        };
         let compose_filter = compose_filter_builder.build()?;
         let match_type = Self::match_type(compose_filter.matcher1(), compose_filter.matcher2())?;
 
@@ -155,14 +196,24 @@ where
         let fprops2 = fst2.borrow().properties();
         let cprops = compose_properties(fprops1, fprops2);
         let properties = compose_filter.properties(cprops);
+        let compose_state = op_state.unwrap_or_default();
+        let start = match (fst1.borrow().start(), fst2.borrow().start()) {
+            (Some(s1), Some(s2)) => Some(compose_state.intern(ComposeStateTuple {
+                fs: compose_filter.start(),
+                s1,
+                s2,
+            })?),
+            _ => None,
+        };
 
         Ok(Self {
             compose_filter_builder,
-            compose_state: opts.op_state.unwrap_or_default(),
+            compose_state,
             match_type,
             properties,
             fst1,
             fst2,
+            start,
         })
     }
 
@@ -280,7 +331,7 @@ where
             arc1.ilabel,
             arc2.olabel,
             arc1.weight,
-            self.compose_state.state_table.find_id(tuple),
+            self.compose_state.intern(tuple)?,
         ))
     }
 
@@ -387,24 +438,11 @@ where
     CFB: ComposeFilterBuilder<W, F1, F2, B1, B2, M1, M2>,
 {
     fn compute_start(&self) -> Result<Option<StateId>> {
-        let compose_filter = self.compose_filter_builder.build()?;
-        let s1 = self.fst1.borrow().start();
-        if s1.is_none() {
-            return Ok(None);
-        }
-        let s1 = s1.unwrap();
-        let s2 = self.fst2.borrow().start();
-        if s2.is_none() {
-            return Ok(None);
-        }
-        let s2 = s2.unwrap();
-        let fs = compose_filter.start();
-        let tuple = ComposeStateTuple { fs, s1, s2 };
-        Ok(Some(self.compose_state.state_table.find_id(tuple)))
+        Ok(self.start)
     }
 
     fn compute_trs(&self, state: StateId) -> Result<TrsVec<W>> {
-        let tuple = self.compose_state.state_table.find_tuple(state);
+        let tuple = self.compose_state.resolve(state)?;
         let s1 = tuple.s1;
         let s2 = tuple.s2;
 
@@ -418,7 +456,7 @@ where
     }
 
     fn compute_final_weight(&self, state: StateId) -> Result<Option<W>> {
-        let tuple = self.compose_state.state_table.find_tuple(state);
+        let tuple = self.compose_state.resolve(state)?;
 
         // Construct a new ComposeFilter each time to avoid mutating the internal state.
         let mut compose_filter = self.compose_filter_builder.build()?;
