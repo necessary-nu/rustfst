@@ -34,6 +34,12 @@ where
     ghost: PhantomData<(CD, F)>,
 }
 
+struct DeterminizeTrAccumulator<W: Semiring> {
+    det_tr: DeterminizeTr<W>,
+    dest_weights: HashMap<StateId, W, FxBuildHasher>,
+    raw_pairs: Vec<DeterminizeElement<W>>,
+}
+
 impl<W, F, CD, B, BT> FstOp<W> for DeterminizeFsaOp<W, F, CD, B, BT>
 where
     W: Semiring + WeaklyDivisibleSemiring + WeightQuantize,
@@ -56,42 +62,60 @@ where
 
     fn compute_trs(&self, state: StateId) -> Result<TrsVec<W>> {
         // GetLabelMap
-        let mut label_map: BTreeMap<Label, DeterminizeTr<W>> = BTreeMap::new();
+        let mut label_map: BTreeMap<Label, DeterminizeTrAccumulator<W>> = BTreeMap::new();
+        let mut expansion_elements = 0usize;
         let src_tuple = self.state_table.find_tuple(state);
         for src_elt in src_tuple.subset.iter() {
             for tr in self.fst.borrow().get_trs(src_elt.state)?.trs() {
                 let r = src_elt.weight.times(&tr.weight)?;
-
-                let dest_elt = DeterminizeElement::new(tr.nextstate, r);
-
-                // Filter Tr
-                match label_map.entry(tr.ilabel) {
-                    EntryBTreeMap::Occupied(_) => {}
-                    EntryBTreeMap::Vacant(e) => {
-                        e.insert(DeterminizeTr::from_tr(tr, 0));
-                    }
+                let accumulator = match label_map.entry(tr.ilabel) {
+                    EntryBTreeMap::Occupied(entry) => entry.into_mut(),
+                    EntryBTreeMap::Vacant(entry) => entry.insert(DeterminizeTrAccumulator {
+                        det_tr: DeterminizeTr::from_tr(tr, 0),
+                        dest_weights: HashMap::with_hasher(FxBuildHasher::default()),
+                        raw_pairs: Vec::new(),
+                    }),
                 };
-
-                label_map
-                    .get_mut(&tr.ilabel)
-                    .unwrap()
-                    .dest_tuple
-                    .subset
-                    .pairs
-                    .push(dest_elt);
+                if CD::MERGE_BEFORE_DIVISOR {
+                    match accumulator.dest_weights.entry(tr.nextstate) {
+                        EntryHashMap::Vacant(entry) => {
+                            expansion_elements = expansion_elements.saturating_add(1);
+                            self.state_table
+                                .check_expansion_elements(expansion_elements)?;
+                            entry.insert(r);
+                        }
+                        EntryHashMap::Occupied(mut entry) => {
+                            entry.get_mut().plus_assign(&r)?;
+                        }
+                    }
+                } else {
+                    expansion_elements = expansion_elements.saturating_add(1);
+                    self.state_table
+                        .check_expansion_elements(expansion_elements)?;
+                    accumulator
+                        .raw_pairs
+                        .push(DeterminizeElement::new(tr.nextstate, r));
+                }
             }
         }
 
-        for det_tr in label_map.values_mut() {
-            self.norm_tr(det_tr)?;
-        }
-
         let mut trs = vec![];
-        for det_tr in label_map.values() {
+        for mut accumulator in label_map.into_values() {
+            accumulator.det_tr.dest_tuple.subset.pairs = if CD::MERGE_BEFORE_DIVISOR {
+                accumulator
+                    .dest_weights
+                    .into_iter()
+                    .map(|(state, weight)| DeterminizeElement::new(state, weight))
+                    .collect()
+            } else {
+                accumulator.raw_pairs
+            };
+            self.norm_tr(&mut accumulator.det_tr, CD::MERGE_BEFORE_DIVISOR)?;
+            let det_tr = accumulator.det_tr;
             trs.push(Tr::new(
                 det_tr.label,
                 det_tr.label,
-                det_tr.weight.clone(),
+                det_tr.weight,
                 self.find_state(&det_tr.dest_tuple)?,
             ));
         }
@@ -133,59 +157,57 @@ where
     B: Borrow<F> + Debug,
     BT: Borrow<[W]> + Debug + PartialEq,
 {
-    pub fn new(fst: B, in_dist: Option<BT>, delta: f32) -> Result<Self> {
+    pub fn new_with_subset_limit(
+        fst: B,
+        in_dist: Option<BT>,
+        delta: f32,
+        max_subset_elements: Option<usize>,
+    ) -> Result<Self> {
         if !fst.borrow().properties().contains(FstProperties::ACCEPTOR) {
             bail!("DeterminizeFsaImpl : expected acceptor as argument");
         }
         Ok(Self {
             fst,
-            state_table: DeterminizeStateTable::new(in_dist),
+            state_table: DeterminizeStateTable::new(in_dist, max_subset_elements),
             delta,
             ghost: PhantomData,
         })
     }
 
-    fn norm_tr(&self, det_tr: &mut DeterminizeTr<W>) -> Result<()> {
+    fn norm_tr(&self, det_tr: &mut DeterminizeTr<W>, already_merged: bool) -> Result<()> {
         det_tr
             .dest_tuple
             .subset
             .pairs
-            .sort_by(|a, b| a.state.cmp(&b.state));
+            .sort_by_key(|element| element.state);
 
         for dest_elt in det_tr.dest_tuple.subset.pairs.iter() {
             det_tr.weight = CD::common_divisor(&det_tr.weight, &dest_elt.weight)?;
         }
 
-        // Keyed by StateId, merged by weight; `.values()` order leaks into
-        // `pairs` below but the canonical `sort_by(state)` that follows erases
-        // it (states are unique after the merge, so the sort is a total order).
-        // The hasher therefore cannot influence the output, and this map runs
-        // once per determinize transition — FxHash removes a hot SipHash rehash.
-        let mut new_pairs = HashMap::with_hasher(FxBuildHasher::default());
-        for x in &mut det_tr.dest_tuple.subset.pairs {
-            match new_pairs.entry(x.state) {
-                EntryHashMap::Vacant(e) => {
-                    e.insert(x.clone());
+        if !already_merged {
+            let mut new_pairs = HashMap::with_hasher(FxBuildHasher::default());
+            for element in &mut det_tr.dest_tuple.subset.pairs {
+                match new_pairs.entry(element.state) {
+                    EntryHashMap::Vacant(entry) => {
+                        entry.insert(element.clone());
+                    }
+                    EntryHashMap::Occupied(mut entry) => {
+                        entry.get_mut().weight.plus_assign(&element.weight)?;
+                    }
                 }
-                EntryHashMap::Occupied(mut e) => {
-                    e.get_mut().weight.plus_assign(&x.weight)?;
-                }
-            };
+            }
+            det_tr.dest_tuple.subset.pairs = new_pairs.into_values().collect();
+            det_tr
+                .dest_tuple
+                .subset
+                .pairs
+                .sort_by_key(|element| element.state);
         }
 
-        det_tr.dest_tuple.subset.pairs = new_pairs.values().cloned().collect();
-
-        // The subset is the key under which this destination state is looked up
-        // in the state table (DeterminizeStateTuple derives an order-sensitive
-        // Hash/Eq over `pairs`). Rebuilding from a HashMap above leaves the pairs
-        // in an arbitrary order, so equal subsets would otherwise be assigned
-        // distinct states. Restore a canonical order (by state, unique after the
-        // merge) so identical subsets map to the same state.
-        det_tr
-            .dest_tuple
-            .subset
-            .pairs
-            .sort_by(|a, b| a.state.cmp(&b.state));
+        // The default divisor can merge equal destinations during scanning,
+        // avoiding the former raw Vec + stable sort + second HashMap. The final
+        // sort keeps the state-table key canonical regardless of hash order.
 
         for dest_elt in det_tr.dest_tuple.subset.pairs.iter_mut() {
             dest_elt.weight = dest_elt

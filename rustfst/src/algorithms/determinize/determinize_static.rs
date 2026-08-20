@@ -38,10 +38,11 @@ where
     fst.compute_with_distance()
 }
 
-pub fn determinize_fsa<W, F1, F2, CD>(
+fn determinize_fsa<W, F1, F2, CD>(
     fst_in: &F1,
     delta: f32,
     max_states: Option<usize>,
+    max_subset_elements: Option<usize>,
 ) -> Result<F2>
 where
     W: WeaklyDivisibleSemiring + WeightQuantize,
@@ -52,15 +53,17 @@ where
     if !W::properties().contains(SemiringProperties::LEFT_SEMIRING) {
         bail!("determinize_fsa : weight must be left distributive")
     }
-    let det_fsa: DeterminizeFsa<W, F1, CD, _, Vec<W>> = DeterminizeFsa::new(fst_in, None, delta)?;
+    let det_fsa: DeterminizeFsa<W, F1, CD, _, Vec<W>> =
+        DeterminizeFsa::new_with_subset_limit(fst_in, None, delta, max_subset_elements)?;
     det_fsa.compute_bounded(max_states)
 }
 
-pub fn determinize_fst<W, F1, F2>(
+fn determinize_fst<W, F1, F2>(
     fst_in: &F1,
     det_type: DeterminizeType,
     delta: f32,
     max_states: Option<usize>,
+    max_subset_elements: Option<usize>,
 ) -> Result<F2>
 where
     W: WeaklyDivisibleSemiring + WeightQuantize + 'static,
@@ -90,7 +93,10 @@ where
                 weight_convert(fst_in.borrow(), &mut to_gallic)?;
             let determinized_fsa: VectorFst<GallicWeightMin<W>> =
                 determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(
-                    &fsa, delta, max_states,
+                    &fsa,
+                    delta,
+                    max_states,
+                    max_subset_elements,
                 )?;
             let factored_determinized_fsa: VectorFst<GallicWeightMin<W>> =
                 factor_weight::<_, VectorFst<GallicWeightMin<W>>, _, _, GallicFactorMin<W>>(
@@ -104,7 +110,10 @@ where
                 weight_convert(fst_in.borrow(), &mut to_gallic)?;
             let determinized_fsa: VectorFst<GallicWeightRestrict<W>> =
                 determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(
-                    &fsa, delta, max_states,
+                    &fsa,
+                    delta,
+                    max_states,
+                    max_subset_elements,
                 )?;
             let factored_determinized_fsa: VectorFst<GallicWeightRestrict<W>> =
                 factor_weight::<
@@ -120,7 +129,10 @@ where
             let fsa: VectorFst<GallicWeight<W>> = weight_convert(fst_in.borrow(), &mut to_gallic)?;
             let determinized_fsa: VectorFst<GallicWeight<W>> =
                 determinize_fsa::<_, VectorFst<_>, _, GallicCommonDivisor>(
-                    &fsa, delta, max_states,
+                    &fsa,
+                    delta,
+                    max_states,
+                    max_subset_elements,
                 )?;
             let factored_determinized_fsa: VectorFst<GallicWeight<W>> =
                 factor_weight::<_, VectorFst<GallicWeight<W>>, _, _, GallicFactor<W>>(
@@ -144,6 +156,11 @@ pub struct DeterminizeConfig {
     /// not terminate (e.g. non-twins cyclic FSTs). Any input that converges
     /// within the bound produces byte-identical output to the unbounded run.
     pub max_states: Option<usize>,
+    /// Optional upper bound on the logical weighted-subset elements retained
+    /// by determinization plus those in the state currently being expanded.
+    /// This controls the main input-dependent allocation that `max_states`
+    /// cannot see. `None` preserves the unbounded behavior.
+    pub max_subset_elements: Option<usize>,
 }
 
 impl DeterminizeConfig {
@@ -152,6 +169,7 @@ impl DeterminizeConfig {
             delta,
             det_type,
             max_states: None,
+            max_subset_elements: None,
         }
     }
 
@@ -166,6 +184,13 @@ impl DeterminizeConfig {
     pub fn with_max_states(self, max_states: Option<usize>) -> Self {
         Self { max_states, ..self }
     }
+
+    pub fn with_max_subset_elements(self, max_subset_elements: Option<usize>) -> Self {
+        Self {
+            max_subset_elements,
+            ..self
+        }
+    }
 }
 
 impl Default for DeterminizeConfig {
@@ -174,6 +199,7 @@ impl Default for DeterminizeConfig {
             delta: KDELTA,
             det_type: DeterminizeType::DeterminizeFunctional,
             max_states: None,
+            max_subset_elements: None,
         }
     }
 }
@@ -210,11 +236,17 @@ where
     let delta = config.delta;
     let det_type = config.det_type;
     let max_states = config.max_states;
+    let max_subset_elements = config.max_subset_elements;
     let iprops = fst_in.borrow().properties();
     let mut fst_res: F2 = if iprops.contains(FstProperties::ACCEPTOR) {
-        determinize_fsa::<_, F1, _, DefaultCommonDivisor>(fst_in, delta, max_states)?
+        determinize_fsa::<_, F1, _, DefaultCommonDivisor>(
+            fst_in,
+            delta,
+            max_states,
+            max_subset_elements,
+        )?
     } else {
-        determinize_fst(fst_in, det_type, delta, max_states)?
+        determinize_fst(fst_in, det_type, delta, max_states, max_subset_elements)?
     };
 
     let distinct_psubsequential_labels = !(det_type == DeterminizeType::DeterminizeNonFunctional);
@@ -391,6 +423,60 @@ mod tests {
             res.is_err(),
             "a budget of 1 must abort this determinization"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_subset_element_limit_is_typed_and_precedes_large_expansion() -> Result<()> {
+        use crate::algorithms::determinize::DeterminizeSubsetLimitExceeded;
+
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let start = fst.add_state();
+        fst.set_start(start)?;
+        for _ in 0..4 {
+            let target = fst.add_state();
+            fst.set_final(target, TropicalWeight::one())?;
+            fst.add_tr(start, Tr::new(1, 1, 0.0, target))?;
+        }
+
+        // The start tuple consumes one element. Accumulating its four
+        // same-label destinations would require five coexisting elements, so
+        // the fourth is rejected before it is pushed into the transient Vec.
+        let error = determinize_with_config::<_, _, VectorFst<TropicalWeight>>(
+            &fst,
+            DeterminizeConfig::default().with_max_subset_elements(Some(4)),
+        )
+        .expect_err("the weighted-subset limit must abort expansion");
+        let limit = error
+            .downcast_ref::<DeterminizeSubsetLimitExceeded>()
+            .expect("subset exhaustion has a typed cause");
+        assert_eq!(
+            *limit,
+            DeterminizeSubsetLimitExceeded {
+                limit: 4,
+                attempted: 5
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_subset_element_limit_preserves_within_budget_output() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s: Vec<_> = (0..4).map(|_| fst.add_state()).collect();
+        fst.set_start(s[0])?;
+        fst.set_final(s[3], TropicalWeight::one())?;
+        fst.add_tr(s[0], Tr::new(1, 1, 2.0, s[1]))?;
+        fst.add_tr(s[0], Tr::new(1, 1, 3.0, s[2]))?;
+        fst.add_tr(s[1], Tr::new(2, 2, 4.0, s[3]))?;
+        fst.add_tr(s[2], Tr::new(2, 2, 3.0, s[3]))?;
+
+        let unbounded: VectorFst<TropicalWeight> = determinize(&fst)?;
+        let bounded: VectorFst<TropicalWeight> = determinize_with_config(
+            &fst,
+            DeterminizeConfig::default().with_max_subset_elements(Some(100)),
+        )?;
+        assert_eq!(unbounded, bounded);
         Ok(())
     }
 

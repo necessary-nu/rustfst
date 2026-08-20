@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use crate::algorithms::determinize::{DeterminizeStateTuple, WeightedSubset};
+use crate::algorithms::determinize::{
+    DeterminizeStateTuple, DeterminizeSubsetLimitExceeded, WeightedSubset,
+};
 use crate::fx_hasher::FxBuildHasher;
 use crate::{Semiring, StateId};
 use anyhow::Result;
@@ -24,6 +26,11 @@ struct InnerDeterminizeStateTable<W: Semiring, B: Borrow<[W]>> {
     in_dist: Option<B>,
     // Distance to final DFA states.
     out_dist: Vec<Option<W>>,
+    // Logical elements retained by the unique weighted subsets above. This is
+    // deliberately separate from the DFA-state count: a single state may own
+    // millions of elements.
+    stored_subset_elements: usize,
+    max_subset_elements: Option<usize>,
 }
 
 impl<W: Semiring, B: Borrow<[W]> + PartialEq> InnerDeterminizeStateTable<W, B> {
@@ -69,13 +76,31 @@ impl<W: Semiring, B: Borrow<[W]> + PartialEq> PartialEq for DeterminizeStateTabl
 }
 
 impl<W: Semiring, B: Borrow<[W]>> DeterminizeStateTable<W, B> {
-    pub fn new(in_dist: Option<B>) -> Self {
+    pub fn new(in_dist: Option<B>, max_subset_elements: Option<usize>) -> Self {
         Self(RefCell::new(InnerDeterminizeStateTable {
             in_dist,
             out_dist: vec![],
             id_to_tuple: Vec::new(),
             tuple_to_id: HashMap::default(),
+            stored_subset_elements: 0,
+            max_subset_elements,
         }))
+    }
+
+    /// Checks the transient elements accumulated while expanding one existing
+    /// subset. The persistent table and in-progress expansion coexist, so both
+    /// count against one logical element budget.
+    pub fn check_expansion_elements(&self, expansion_elements: usize) -> Result<()> {
+        let inner = self.0.borrow();
+        let attempted = inner
+            .stored_subset_elements
+            .saturating_add(expansion_elements);
+        if let Some(limit) = inner.max_subset_elements {
+            if attempted > limit {
+                return Err(DeterminizeSubsetLimitExceeded { limit, attempted }.into());
+            }
+        }
+        Ok(())
     }
 
     /// Looks up tuple from integer ID. O(1); shares the stored allocation.
@@ -98,6 +123,14 @@ impl<W: Semiring, B: Borrow<[W]> + PartialEq> DeterminizeStateTable<W, B> {
         if let Some(id) = inner.tuple_to_id.get(tuple) {
             return Ok(*id);
         }
+        let attempted = inner
+            .stored_subset_elements
+            .saturating_add(tuple.subset.pairs.len());
+        if let Some(limit) = inner.max_subset_elements {
+            if attempted > limit {
+                return Err(DeterminizeSubsetLimitExceeded { limit, attempted }.into());
+            }
+        }
         let n = inner.id_to_tuple.len();
         if inner.in_dist.is_some() {
             if n >= inner.out_dist.len() {
@@ -111,6 +144,7 @@ impl<W: Semiring, B: Borrow<[W]> + PartialEq> DeterminizeStateTable<W, B> {
         let tuple = Arc::new(tuple.clone());
         inner.id_to_tuple.push(Arc::clone(&tuple));
         inner.tuple_to_id.insert(tuple, n as StateId);
+        inner.stored_subset_elements = attempted;
         Ok(n as StateId)
     }
 }

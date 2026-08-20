@@ -19,8 +19,7 @@ use std::sync::Arc;
 // state-table plus the input FST — nothing ever reads a value back out of the
 // cache. So the cache stores no useful data and can be `NullCache` (no store,
 // no hashing, no lock), which is strictly less work than a storing cache.
-type InnerLazyFst<W, F, CD, B, BT> =
-    LazyFst<W, DeterminizeFsaOp<W, F, CD, B, BT>, NullCache<W>>;
+type InnerLazyFst<W, F, CD, B, BT> = LazyFst<W, DeterminizeFsaOp<W, F, CD, B, BT>, NullCache<W>>;
 
 #[derive(Debug)]
 pub struct DeterminizeFsa<
@@ -154,9 +153,19 @@ where
     BT: Borrow<[W]> + PartialEq + Debug,
 {
     pub fn new(fst: B, in_dist: Option<BT>, delta: f32) -> Result<Self> {
+        Self::new_with_subset_limit(fst, in_dist, delta, None)
+    }
+
+    pub fn new_with_subset_limit(
+        fst: B,
+        in_dist: Option<BT>,
+        delta: f32,
+        max_subset_elements: Option<usize>,
+    ) -> Result<Self> {
         let isymt = fst.borrow().input_symbols().cloned();
         let osymt = fst.borrow().output_symbols().cloned();
-        let fst_op = DeterminizeFsaOp::new(fst, in_dist, delta)?;
+        let fst_op =
+            DeterminizeFsaOp::new_with_subset_limit(fst, in_dist, delta, max_subset_elements)?;
         let fst_cache = NullCache::default();
         let lazy_fst = LazyFst::from_op_and_cache(fst_op, fst_cache, isymt, osymt);
         Ok(DeterminizeFsa(lazy_fst, PhantomData))

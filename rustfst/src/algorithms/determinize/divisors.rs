@@ -9,6 +9,12 @@ use crate::semirings::{
 use crate::Semiring;
 
 pub trait CommonDivisor<W: Semiring>: PartialEq + Debug + Sync {
+    /// Whether equal destination states may be semiring-merged before the
+    /// common divisor is computed. The default is conservative because the
+    /// Gallic/string divisors inspect structure beyond the weight semiring's
+    /// `plus` operation.
+    const MERGE_BEFORE_DIVISOR: bool = false;
+
     fn common_divisor(w1: &W, w2: &W) -> Result<W>;
 }
 
@@ -16,6 +22,8 @@ pub trait CommonDivisor<W: Semiring>: PartialEq + Debug + Sync {
 pub struct DefaultCommonDivisor {}
 
 impl<W: Semiring> CommonDivisor<W> for DefaultCommonDivisor {
+    const MERGE_BEFORE_DIVISOR: bool = true;
+
     fn common_divisor(w1: &W, w2: &W) -> Result<W> {
         w1.plus(w2)
     }
