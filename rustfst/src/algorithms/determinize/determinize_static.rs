@@ -43,6 +43,7 @@ fn determinize_fsa<W, F1, F2, CD>(
     delta: f32,
     max_states: Option<usize>,
     max_subset_elements: Option<usize>,
+    max_trs: Option<usize>,
 ) -> Result<F2>
 where
     W: WeaklyDivisibleSemiring + WeightQuantize,
@@ -55,7 +56,7 @@ where
     }
     let det_fsa: DeterminizeFsa<W, F1, CD, _, Vec<W>> =
         DeterminizeFsa::new_with_subset_limit(fst_in, None, delta, max_subset_elements)?;
-    det_fsa.compute_bounded(max_states)
+    det_fsa.compute_bounded(max_states, max_trs)
 }
 
 fn determinize_fst<W, F1, F2>(
@@ -64,6 +65,7 @@ fn determinize_fst<W, F1, F2>(
     delta: f32,
     max_states: Option<usize>,
     max_subset_elements: Option<usize>,
+    max_trs: Option<usize>,
 ) -> Result<F2>
 where
     W: WeaklyDivisibleSemiring + WeightQuantize + 'static,
@@ -97,6 +99,7 @@ where
                     delta,
                     max_states,
                     max_subset_elements,
+                    max_trs,
                 )?;
             let factored_determinized_fsa: VectorFst<GallicWeightMin<W>> =
                 factor_weight::<_, VectorFst<GallicWeightMin<W>>, _, _, GallicFactorMin<W>>(
@@ -114,6 +117,7 @@ where
                     delta,
                     max_states,
                     max_subset_elements,
+                    max_trs,
                 )?;
             let factored_determinized_fsa: VectorFst<GallicWeightRestrict<W>> =
                 factor_weight::<
@@ -133,6 +137,7 @@ where
                     delta,
                     max_states,
                     max_subset_elements,
+                    max_trs,
                 )?;
             let factored_determinized_fsa: VectorFst<GallicWeight<W>> =
                 factor_weight::<_, VectorFst<GallicWeight<W>>, _, _, GallicFactor<W>>(
@@ -161,6 +166,13 @@ pub struct DeterminizeConfig {
     /// This controls the main input-dependent allocation that `max_states`
     /// cannot see. `None` preserves the unbounded behavior.
     pub max_subset_elements: Option<usize>,
+    /// Optional upper bound on the transitions written to the determinized
+    /// machine. Neither of the other two bounds implies this one: determinizing
+    /// a union whose operands differ sharply in density gives every surviving
+    /// state the densest operand's out-degree, so a state count well inside
+    /// `max_states` can still carry orders of magnitude more transitions than
+    /// the input held. `None` preserves the unbounded behavior.
+    pub max_trs: Option<usize>,
 }
 
 impl DeterminizeConfig {
@@ -170,6 +182,7 @@ impl DeterminizeConfig {
             det_type,
             max_states: None,
             max_subset_elements: None,
+            max_trs: None,
         }
     }
 
@@ -191,6 +204,10 @@ impl DeterminizeConfig {
             ..self
         }
     }
+
+    pub fn with_max_trs(self, max_trs: Option<usize>) -> Self {
+        Self { max_trs, ..self }
+    }
 }
 
 impl Default for DeterminizeConfig {
@@ -200,6 +217,7 @@ impl Default for DeterminizeConfig {
             det_type: DeterminizeType::DeterminizeFunctional,
             max_states: None,
             max_subset_elements: None,
+            max_trs: None,
         }
     }
 }
@@ -237,6 +255,7 @@ where
     let det_type = config.det_type;
     let max_states = config.max_states;
     let max_subset_elements = config.max_subset_elements;
+    let max_trs = config.max_trs;
     let iprops = fst_in.borrow().properties();
     let mut fst_res: F2 = if iprops.contains(FstProperties::ACCEPTOR) {
         determinize_fsa::<_, F1, _, DefaultCommonDivisor>(
@@ -244,9 +263,17 @@ where
             delta,
             max_states,
             max_subset_elements,
+            max_trs,
         )?
     } else {
-        determinize_fst(fst_in, det_type, delta, max_states, max_subset_elements)?
+        determinize_fst(
+            fst_in,
+            det_type,
+            delta,
+            max_states,
+            max_subset_elements,
+            max_trs,
+        )?
     };
 
     let distinct_psubsequential_labels = !(det_type == DeterminizeType::DeterminizeNonFunctional);
@@ -475,6 +502,60 @@ mod tests {
         let bounded: VectorFst<TropicalWeight> = determinize_with_config(
             &fst,
             DeterminizeConfig::default().with_max_subset_elements(Some(100)),
+        )?;
+        assert_eq!(unbounded, bounded);
+        Ok(())
+    }
+
+    // A determinization whose output is dense in transitions but modest in
+    // states escapes both other bounds; only the transition budget sees it.
+    #[test]
+    fn test_tr_limit_is_typed_and_independent_of_the_state_bound() -> Result<()> {
+        use crate::algorithms::lazy::ComputeTrLimitExceeded;
+
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let start = fst.add_state();
+        let end = fst.add_state();
+        fst.set_start(start)?;
+        fst.set_final(end, TropicalWeight::one())?;
+        for label in 1..=32 {
+            fst.add_tr(start, Tr::new(label, label, 0.0, end))?;
+        }
+
+        // Two states and one element per subset — generous against both
+        // existing axes — yet 32 transitions to write.
+        let error = determinize_with_config::<_, _, VectorFst<TropicalWeight>>(
+            &fst,
+            DeterminizeConfig::default()
+                .with_max_states(Some(1_000_000))
+                .with_max_subset_elements(Some(1_000_000))
+                .with_max_trs(Some(8)),
+        )
+        .expect_err("the transition limit must abort materialization");
+        let limit = error
+            .downcast_ref::<ComputeTrLimitExceeded>()
+            .expect("transition exhaustion has a typed cause");
+        assert_eq!(limit.limit, 8);
+        assert!(limit.attempted > 8);
+        Ok(())
+    }
+
+    // Byte-identity invariant for the transition bound.
+    #[test]
+    fn test_tr_limit_preserves_within_budget_output() -> Result<()> {
+        let mut fst = VectorFst::<TropicalWeight>::new();
+        let s: Vec<_> = (0..4).map(|_| fst.add_state()).collect();
+        fst.set_start(s[0])?;
+        fst.set_final(s[3], TropicalWeight::one())?;
+        fst.add_tr(s[0], Tr::new(1, 1, 2.0, s[1]))?;
+        fst.add_tr(s[0], Tr::new(1, 1, 3.0, s[2]))?;
+        fst.add_tr(s[1], Tr::new(2, 2, 4.0, s[3]))?;
+        fst.add_tr(s[2], Tr::new(2, 2, 3.0, s[3]))?;
+
+        let unbounded: VectorFst<TropicalWeight> = determinize(&fst)?;
+        let bounded: VectorFst<TropicalWeight> = determinize_with_config(
+            &fst,
+            DeterminizeConfig::default().with_max_trs(Some(1_000_000)),
         )?;
         assert_eq!(unbounded, bounded);
         Ok(())

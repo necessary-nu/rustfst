@@ -54,6 +54,7 @@ pub struct CDeterminizeConfig {
     // Not exposed by the stable C constructor yet, but retained when a Rust
     // config crosses this opaque-pointer boundary.
     max_subset_elements: Option<usize>,
+    max_trs: Option<usize>,
 }
 
 impl AsRust<DeterminizeConfig> for CDeterminizeConfig {
@@ -63,6 +64,7 @@ impl AsRust<DeterminizeConfig> for CDeterminizeConfig {
             det_type: self.det_type.as_rust()?,
             max_states: self.max_states,
             max_subset_elements: self.max_subset_elements,
+            max_trs: self.max_trs,
         })
     }
 }
@@ -80,6 +82,7 @@ impl CReprOf<DeterminizeConfig> for CDeterminizeConfig {
             det_type: CDeterminizeType::c_repr_of(value.det_type)?,
             max_states: value.max_states,
             max_subset_elements: value.max_subset_elements,
+            max_trs: value.max_trs,
         })
     }
 }
@@ -109,6 +112,7 @@ pub unsafe extern "C" fn fst_determinize_config_new(
                 Some(max_states)
             },
             max_subset_elements: None,
+            max_trs: None,
         };
         unsafe { *config = determinize_config.into_raw_pointer() };
         Ok(())

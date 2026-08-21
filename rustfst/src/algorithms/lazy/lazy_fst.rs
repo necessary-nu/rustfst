@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::error::Error;
+use std::fmt;
 use std::fmt::Debug;
 use std::iter::{repeat, Map, Repeat, Zip};
 use std::marker::PhantomData;
@@ -18,6 +20,34 @@ use crate::fst_traits::{
 };
 use crate::semirings::{Semiring, SerializableSemiring};
 use crate::{StateId, SymbolTable, Trs, TrsVec};
+
+/// Lazy materialization stopped before writing more transitions than the caller
+/// allowed.
+///
+/// Distinct from the state budget: one state of a materialized machine can carry
+/// an unbounded number of transitions, so a state count is not a memory bound.
+/// A caller that hits this limit learns that the operation's *output* is too
+/// large, not that its search failed to converge — retrying with a strategy that
+/// splits paths further (weight encoding, say) can only make it worse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ComputeTrLimitExceeded {
+    /// Maximum number of transitions the caller allowed.
+    pub limit: usize,
+    /// Number the materialization had already produced when it stopped.
+    pub attempted: usize,
+}
+
+impl fmt::Display for ComputeTrLimitExceeded {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "compute_bounded: transition budget of {} exceeded (attempted {})",
+            self.limit, self.attempted
+        )
+    }
+}
+
+impl Error for ComputeTrLimitExceeded {}
 
 #[derive(Debug, Clone)]
 pub struct LazyFst<W: Semiring, Op: FstOp<W>, Cache> {
@@ -224,24 +254,34 @@ where
 
     /// Turns the Lazy FST into a static one.
     pub fn compute<F2: MutableFst<W> + AllocableFst<W>>(&self) -> Result<F2> {
-        self.compute_bounded(None)
+        self.compute_bounded(None, None)
     }
 
     /// Materialize the lazy FST into a static one, optionally aborting once more
-    /// than `max_states` states have been produced.
+    /// than `max_states` states or `max_trs` transitions have been produced.
     ///
-    /// With `max_states == None` this is unbounded and behaves identically to
+    /// With both bounds `None` this is unbounded and behaves identically to
     /// [`Self::compute`]. When a bound is supplied and the on-demand expansion
-    /// produces more than that many states, the computation returns an `Err`
-    /// instead of running away. This is the escape hatch for lazy operations
-    /// (e.g. weighted determinization of a non-twins cyclic FST) that may never
-    /// terminate: the caller can catch the error and retry with a different
-    /// strategy. The bound counts states discovered during the BFS, so the same
+    /// exceeds it, the computation returns an `Err` instead of running away.
+    /// This is the escape hatch for lazy operations (e.g. weighted
+    /// determinization of a non-twins cyclic FST) that may never terminate: the
+    /// caller can catch the error and retry with a different strategy.
+    ///
+    /// The two bounds measure different things and neither implies the other. A
+    /// state count bounds how many DFA states exist; a transition count bounds
+    /// the machine that is actually written out. Determinizing a union whose
+    /// operands differ sharply in density gives every surviving state the
+    /// densest operand's out-degree, so a modest state count can carry orders of
+    /// magnitude more transitions than the input had — memory follows the
+    /// transitions, not the states.
+    ///
+    /// Both bounds count only what the BFS has already produced, so the same
     /// input that terminates unbounded produces byte-identical output as long as
-    /// the bound is not tripped.
+    /// neither bound is tripped.
     pub fn compute_bounded<F2: MutableFst<W> + AllocableFst<W>>(
         &self,
         max_states: Option<usize>,
+        max_trs: Option<usize>,
     ) -> Result<F2> {
         let start_state = self.start();
         let mut fst_out = F2::new();
@@ -256,9 +296,20 @@ where
         visited_states.resize(start_state as usize + 1, false);
         visited_states[start_state as usize] = true;
         let mut num_discovered: usize = 1;
+        let mut num_trs: usize = 0;
         queue.push_back(start_state);
         while let Some(s) = queue.pop_front() {
             let trs_owner = self.get_trs(s)?;
+            if let Some(bound) = max_trs {
+                num_trs = num_trs.saturating_add(trs_owner.trs().len());
+                if num_trs > bound {
+                    return Err(ComputeTrLimitExceeded {
+                        limit: bound,
+                        attempted: num_trs,
+                    }
+                    .into());
+                }
+            }
             for tr in trs_owner.trs() {
                 if (tr.nextstate as usize) >= visited_states.len() {
                     visited_states.resize(tr.nextstate as usize + 1, false);
